@@ -1,6 +1,17 @@
 {
-   "name": "media-parser",
+   "name": "tauri-plugin-media-parser",
+   "version": "0.1.0",
+   "description": "A Tauri plugin for parsing MP4 media files: metadata, tracks, frames, and subtitles",
+   "main": "dist-js/index.js",
+   "types": "dist-js/index.d.ts",
+   "files": [
+      "dist-js",
+      "permissions"
+   ],
    "scripts": {
+      "build": "cd guest-js && tsc",
+      "prepare": "npm run build",
+      "prepublishOnly": "npm run build",
       "check-node-version": "check-node-version --npm 10.5.0",
       "commitlint": "commitlint --from 3c4cb7c",
       "markdownlint": "markdownlint-cli2",
@@ -10,15 +21,19 @@
    },
    "repository": {
       "type": "git",
-      "url": "git+https://github.com/silvermine/media-parser.git"
+      "url": "git+https://github.com/silvermine/tauri-plugin-media-parser.git"
    },
    "author": "Jeremy Thomerson",
    "license": "MIT",
    "bugs": {
-      "url": "https://github.com/silvermine/media-parser/issues"
+      "url": "https://github.com/silvermine/tauri-plugin-media-parser/issues"
    },
-   "homepage": "https://github.com/silvermine/media-parser#readme",
+   "homepage": "https://github.com/silvermine/tauri-plugin-media-parser#readme",
    "devDependencies": {
-      "@silvermine/standardization": "github:silvermine/standardization#55d8b668abe5c63d4ea9a8184424eb3d2b7b55db"
+      "@silvermine/standardization": "github:silvermine/standardization#55d8b668abe5c63d4ea9a8184424eb3d2b7b55db",
+      "@tauri-apps/api": "2.9.0"
+   },
+   "peerDependencies": {
+      "@tauri-apps/api": "2.9.0"
    }
 }
