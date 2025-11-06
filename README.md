@@ -162,3 +162,11 @@ MIT
 Contributions are welcome! Please follow the established coding standards and commit
 message conventions.
 
+## Development
+
+### Linting
+
+   * `npm run standards` - Runs all linting, including `clippy`, `rustfmt` (check only),
+     `commitlint`, `markdownlint`, etc.
+   * `npm run rust:lint` - Runs linting on Rust code only
+   * `npm run rust:lint:fix` - Formats Rust code
