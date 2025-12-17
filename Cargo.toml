@@ -7,7 +7,7 @@ members = [
 [package]
 name = "tauri-plugin-media-parser"
 version = "0.1.0"
-description = "A Tauri plugin for parsing MP4 media files: metadata, tracks, frames, and subtitles"
+description = "A Tauri plugin for parsing media files, including metadata, tracks, frames, and subtitles, currently supporting MP4 and MP3 formats."
 license = "MIT"
 edition = "2024"
 rust-version = "1.89"
@@ -15,9 +15,10 @@ links = "tauri-plugin-media-parser"
 
 [dependencies]
 tauri = "2.5.1"
-serde = { version = "1", features = ["derive"] }
-thiserror = "1"
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.18"
 media-parser = { path = "crates/media-parser" }
+url = "2.5.8"
 
 [build-dependencies]
-tauri-plugin = { version = "2.5.1", features = ["build"] }
+tauri-plugin = { version = "2.5.3", features = ["build"] }
