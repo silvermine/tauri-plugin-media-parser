@@ -27,6 +27,27 @@ pub enum MediaParserError {
    #[error("Metadata key not found: {0}")]
    MetadataKeyNotFound(String),
 
+   /// Error occurred in a blocking task (spawn_blocking)
+   #[error("Blocking task error: {0}")]
+   BlockingTask(String),
+
+   /// HTTP request failed
+   #[error("HTTP request failed: {0}")]
+   HttpRequest(String),
+
+   /// HTTP response had an error status code
+   #[error("HTTP error status: {0}")]
+   HttpStatus(u16),
+
+   /// Content-Length header missing or invalid
+   #[error("Content-Length header missing or invalid")]
+   ContentLengthMissing,
+
+   /// Content length not available
+   #[error("Content length not available")]
+   ContentLengthUnavailable,
+
+   /// Other error (fallback for cases not covered above)
    #[error("Other error: {0}")]
    Other(String),
 }
