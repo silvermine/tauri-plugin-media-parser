@@ -2,11 +2,12 @@
 
 [![CI][ci-badge]][ci-url]
 
-A Tauri plugin to parse MP4 files: extract metadata, tracks, frames, and subtitles.
-Async API for getting info from local files or HTTP streams.
+A Tauri plugin to parse media files (MP3, MP4): extract metadata,
+tracks, frames, and subtitles. Async API for getting info from local
+files or HTTP streams.
 
-[ci-badge]: https://github.com/silvermine/tauri-plugin-sqlite/actions/workflows/ci.yml/badge.svg
-[ci-url]: https://github.com/silvermine/tauri-plugin-sqlite/actions/workflows/ci.yml
+[ci-badge]: https://github.com/silvermine/tauri-plugin-media-parser/actions/workflows/ci.yml/badge.svg
+[ci-url]: https://github.com/silvermine/tauri-plugin-media-parser/actions/workflows/ci.yml
 
 ## Project Structure
 
@@ -15,8 +16,15 @@ This project is organized as a Cargo workspace with the following structure:
 ```text
 tauri-plugin-media-parser/
 ├── crates/
-│   └── media-parser/          # Rust MP4 parser library
+│   └── media-parser/          # Rust media parser library
 │       ├── src/
+│       │   ├── format/
+│       │   │   ├── mp3/       # MP3 parsing (frames, duration, ID3 tags)
+│       │   │   ├── mp4/       # MP4 parsing (atoms, moov, metadata)
+│       │   │   │   └── atoms/ # Box/atom reading, iteration, navigation
+│       │   │   ├── registry.rs # Format detection and parser dispatch
+│       │   │   └── signatures.rs # Markers and extension mappings
+│       │   ├── helpers/       # Byte reading, text decoding utilities
 │       │   ├── errors.rs
 │       │   ├── lib.rs
 │       │   ├── stream.rs
@@ -134,11 +142,28 @@ npm install @silvermine/tauri-plugin-media-parser
 Use the plugin from JavaScript/TypeScript:
 
 ```typescript
-import { hello } from '@silvermine/tauri-plugin-media-parser';
+import {
+   getMetadata,
+   getDurationInSeconds,
+   getMetadataValue,
+} from '@silvermine/tauri-plugin-media-parser';
 
-// Call the hello command
-const greeting = await hello('World');
-console.log(greeting); // "Hello, World! This is the Media Parser plugin."
+// Extract metadata from a local file
+const metadata = await getMetadata('/path/to/video.mp4');
+
+// Or from a remote URL with optional headers
+const remoteMetadata = await getMetadata('https://example.com/video.mp4', {
+   headers: { 'Authorization': 'Bearer token123' },
+});
+
+// Get duration in seconds
+const duration = getDurationInSeconds(metadata);
+console.log(`Duration: ${duration}s`);
+
+// Get specific metadata values
+const title = getMetadataValue(metadata, 'Title');
+const artist = getMetadataValue(metadata, 'Artist');
+console.log(`Title: ${title}, Artist: ${artist}`);
 ```
 
 ## Development Standards

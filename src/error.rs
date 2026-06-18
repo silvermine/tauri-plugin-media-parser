@@ -6,6 +6,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
    #[error("{0}")]
    Custom(String),
+   #[error("Media parser error: {0}")]
+   MediaParser(#[from] media_parser::MediaParserError),
 }
 
 impl Serialize for Error {

@@ -3,6 +3,6 @@
 [default]
 description = "Default permissions for the media-parser plugin"
 permissions = [
-   "allow-hello",
+   "allow-get-metadata",
 ]
 

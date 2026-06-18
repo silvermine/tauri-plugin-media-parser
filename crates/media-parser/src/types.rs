@@ -1,10 +1,11 @@
+use serde::Serialize;
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// Single metadata item (from `ilst`).
-#[derive(Debug, Clone, PartialEq)]
+/// Single extracted metadata item.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Meta {
-   /// Raw fourcc key, using `@` for 0xA9 (e.g., "@nam").
+   /// Raw metadata key (e.g., "@nam" for MP4, "TIT2" for MP3).
    pub key: String,
    /// Friendly mapped name (e.g., "Title", or "Unknown").
    pub name: String,
@@ -12,13 +13,15 @@ pub struct Meta {
    pub value: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Metadata {
-   /// All metadata items found under `moov/udta/meta/ilst`.
+   /// Detected format name (e.g., "MP4/M4A/MOV", "MP3").
+   pub format: String,
+   /// All metadata items found.
    pub values: Vec<Meta>,
    /// Time units per second for `duration`.
    pub timescale: u32,
-   /// Total raw duration in `timescale` units (from `mvhd`).
+   /// Total raw duration in `timescale` units.
    pub duration: u64,
 }
 
@@ -31,6 +34,15 @@ impl Metadata {
          .iter()
          .find(|meta| meta.name.to_lowercase() == name.to_lowercase())
          .map(|meta| meta.value.as_str())
+   }
+}
+
+impl<'a> IntoIterator for &'a Metadata {
+   type Item = &'a Meta;
+   type IntoIter = std::slice::Iter<'a, Meta>;
+
+   fn into_iter(self) -> Self::IntoIter {
+      self.values.iter()
    }
 }
 
