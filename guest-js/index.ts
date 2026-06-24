@@ -1,59 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 
-// ============================================================================
-// Types
-// ============================================================================
+import type { Metadata, MetadataOptions, TrackInfo } from './types';
 
-/**
- * Single extracted metadata item.
- */
-export interface Meta {
-   /** Raw metadata key (e.g., "@nam" for MP4, "TIT2" for MP3). */
-   key: string;
-   /** Friendly mapped name (e.g., "Title", "Artist", or "Unknown"). */
-   name: string;
-   /** Extracted value (UTF-8, trimmed of null padding). */
-   value: string;
-}
-
-/**
- * Metadata extracted from a media file.
- */
-export interface Metadata {
-   /** Detected format name (e.g., "MP4/M4A/MOV", "MP3"). */
-   format: string;
-   /** All metadata items found. */
-   values: Meta[];
-   /** Time units per second for `duration`. */
-   timescale: number;
-   /** Total raw duration in `timescale` units. */
-   duration: number;
-}
-
-/**
- * Options for metadata extraction.
- */
-export interface MetadataOptions {
-   /** Custom HTTP headers to send with the request (only used for URLs). */
-   headers?: Record<string, string>;
-}
-
-/**
- * Track information extracted from a media file.
- */
-export interface TrackInfo {
-   kind: 'video' | 'audio' | 'subtitle' | 'unknown';
-   id: number;
-   codec: string;
-   language?: string;
-   timescale: number;
-   duration: number;
-   properties: Record<string, string>;
-   width?: number;
-   height?: number;
-   channels?: number;
-   sampleRate?: number;
-}
+export * from './types';
 
 // ============================================================================
 // Functions
