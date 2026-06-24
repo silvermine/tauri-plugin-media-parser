@@ -33,7 +33,7 @@ const TKHD_V0_DURATION_OFFSET: usize = 20;
 const TKHD_V0_WIDTH_OFFSET: usize = 76;
 const TKHD_V0_HEIGHT_OFFSET: usize = 80;
 const TKHD_V1_TRACK_ID_OFFSET: usize = 20;
-const TKHD_V1_DURATION_OFFSET: usize = 32;
+const TKHD_V1_DURATION_OFFSET: usize = 28;
 const TKHD_V1_WIDTH_OFFSET: usize = 88;
 const TKHD_V1_HEIGHT_OFFSET: usize = 92;
 
@@ -222,6 +222,43 @@ mod tests {
    fn test_decode_language() {
       assert_eq!(decode_language(0x15c7), Some(*b"eng"));
       assert_eq!(decode_language(0x55c4), None);
+   }
+
+   #[test]
+   fn test_parse_tkhd_v0() {
+      // Offsets are spec-derived literals (NOT the module constants) so the
+      // test is an independent oracle for the v0 field layout.
+      let mut tkhd = vec![0u8; 84];
+      tkhd[0] = 0; // version 0
+      tkhd[12..16].copy_from_slice(&3u32.to_be_bytes()); // track_ID
+      tkhd[20..24].copy_from_slice(&1000u32.to_be_bytes()); // duration (32-bit)
+      tkhd[76..80].copy_from_slice(&(640u32 << 16).to_be_bytes()); // width 16.16
+      tkhd[80..84].copy_from_slice(&(480u32 << 16).to_be_bytes()); // height 16.16
+
+      let parsed = parse_tkhd(&tkhd).unwrap();
+      assert_eq!(parsed.id, 3);
+      assert_eq!(parsed.duration, 1000);
+      assert_eq!(parsed.width, 640);
+      assert_eq!(parsed.height, 480);
+   }
+
+   #[test]
+   fn test_parse_tkhd_v1_reads_64bit_duration() {
+      // Offsets are spec-derived literals (NOT the module constants) so the
+      // test is an independent oracle for the field layout.
+      let mut tkhd = vec![0u8; 96];
+      tkhd[0] = 1; // version 1
+      tkhd[20..24].copy_from_slice(&7u32.to_be_bytes()); // track_ID
+      let duration = 5_000_000_000u64; // > u32::MAX, distinguishes offset 28 vs 32
+      tkhd[28..36].copy_from_slice(&duration.to_be_bytes());
+      tkhd[88..92].copy_from_slice(&(1920u32 << 16).to_be_bytes()); // width 16.16
+      tkhd[92..96].copy_from_slice(&(1080u32 << 16).to_be_bytes()); // height 16.16
+
+      let parsed = parse_tkhd(&tkhd).unwrap();
+      assert_eq!(parsed.id, 7);
+      assert_eq!(parsed.duration, 5_000_000_000);
+      assert_eq!(parsed.width, 1920);
+      assert_eq!(parsed.height, 1080);
    }
 
    #[test]
