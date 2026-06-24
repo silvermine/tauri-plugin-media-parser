@@ -40,7 +40,13 @@ pub async fn read_tracks(reader: &dyn StreamReader) -> Result<Vec<TrackType>> {
          continue;
       }
 
-      tracks.push(parse_trak(trak)?);
+      // Best-effort: skip a malformed trak (missing the spec-required
+      // tkhd/mdia/mdhd) instead of failing the whole file, so one bad track
+      // doesn't drop every other track.
+      match parse_trak(trak) {
+         Ok(track) => tracks.push(track),
+         Err(e) => log::warn!("skipping malformed trak: {e}"),
+      }
    }
 
    Ok(tracks)
