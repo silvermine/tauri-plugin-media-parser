@@ -19,13 +19,10 @@ pub struct MediaHeader {
 }
 
 #[derive(Debug, Clone)]
-pub struct SampleDescription {
+pub struct SampleDescription<T> {
    pub codec: String,
-   pub width: Option<u32>,
-   pub height: Option<u32>,
-   pub channels: Option<u16>,
-   pub sample_rate: Option<u32>,
    pub entry_count: u32,
+   pub entry: T,
 }
 
 const TKHD_V0_TRACK_ID_OFFSET: usize = 12;
@@ -119,19 +116,32 @@ pub fn parse_hdlr(hdlr: &[u8]) -> Option<[u8; 4]> {
       .ok()
 }
 
-pub fn parse_stsd(stsd: &[u8]) -> Option<SampleDescription> {
+pub fn parse_stsd<T>(
+   stsd: &[u8],
+   decode_entry: impl FnOnce(&[u8]) -> T,
+) -> Option<SampleDescription<T>> {
    let entry_count = read_u32_be(stsd, 4)?;
    let sample_entry = read_box(stsd, STSD_ENTRIES_OFFSET)?;
-   let payload = sample_entry.payload;
 
    Some(SampleDescription {
       codec: fourcc_string(sample_entry.fourcc),
-      width: read_u16_be(payload, VISUAL_WIDTH_OFFSET).map(u32::from),
-      height: read_u16_be(payload, VISUAL_HEIGHT_OFFSET).map(u32::from),
-      channels: read_u16_be(payload, AUDIO_CHANNELS_OFFSET),
-      sample_rate: read_u32_be(payload, AUDIO_SAMPLE_RATE_OFFSET).map(|rate| rate >> 16),
       entry_count,
+      entry: decode_entry(sample_entry.payload),
    })
+}
+
+pub fn visual_dimensions(payload: &[u8]) -> (Option<u32>, Option<u32>) {
+   (
+      read_u16_be(payload, VISUAL_WIDTH_OFFSET).map(u32::from),
+      read_u16_be(payload, VISUAL_HEIGHT_OFFSET).map(u32::from),
+   )
+}
+
+pub fn audio_params(payload: &[u8]) -> (Option<u16>, Option<u32>) {
+   (
+      read_u16_be(payload, AUDIO_CHANNELS_OFFSET),
+      read_u32_be(payload, AUDIO_SAMPLE_RATE_OFFSET).map(|rate| rate >> 16),
+   )
 }
 
 pub fn expand_sample_durations(stts: &[u8], max_samples: u32) -> Option<Vec<u32>> {
@@ -273,10 +283,9 @@ mod tests {
       stsd[4..8].copy_from_slice(&1u32.to_be_bytes());
       stsd.extend(make_box(b"avc1", &visual_payload));
 
-      let parsed = parse_stsd(&stsd).unwrap();
+      let parsed = parse_stsd(&stsd, visual_dimensions).unwrap();
       assert_eq!(parsed.codec, "avc1");
-      assert_eq!(parsed.width, Some(320));
-      assert_eq!(parsed.height, Some(180));
+      assert_eq!(parsed.entry, (Some(320), Some(180)));
       assert_eq!(parsed.entry_count, 1);
    }
 
@@ -292,10 +301,9 @@ mod tests {
       stsd[4..8].copy_from_slice(&1u32.to_be_bytes());
       stsd.extend(make_box(b"mp4a", &audio_payload));
 
-      let parsed = parse_stsd(&stsd).unwrap();
+      let parsed = parse_stsd(&stsd, audio_params).unwrap();
       assert_eq!(parsed.codec, "mp4a");
-      assert_eq!(parsed.channels, Some(2));
-      assert_eq!(parsed.sample_rate, Some(44_100));
+      assert_eq!(parsed.entry, (Some(2), Some(44_100)));
    }
 
    #[test]

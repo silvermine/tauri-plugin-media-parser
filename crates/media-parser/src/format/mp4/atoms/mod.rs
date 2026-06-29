@@ -34,6 +34,6 @@ pub use types::Mp4Box;
 
 // Track parsing helpers are internal to the MP4 module.
 pub(super) use media::{
-   expand_sample_durations, expand_sample_sizes, fourcc_string, parse_hdlr, parse_mdhd, parse_stsd,
-   parse_tkhd, stts_sample_count,
+   audio_params, expand_sample_durations, expand_sample_sizes, fourcc_string, parse_hdlr,
+   parse_mdhd, parse_stsd, parse_tkhd, stts_sample_count, visual_dimensions,
 };

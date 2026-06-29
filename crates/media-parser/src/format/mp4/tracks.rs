@@ -3,8 +3,9 @@
 //! Reads information from each `trak` box without touching media samples.
 
 use super::atoms::{
-   Mp4Nav, expand_sample_durations, expand_sample_sizes, find_and_read_moov_box, fourcc_string,
-   iter_boxes, parse_hdlr, parse_mdhd, parse_stsd, parse_tkhd, stts_sample_count,
+   Mp4Nav, audio_params, expand_sample_durations, expand_sample_sizes, find_and_read_moov_box,
+   fourcc_string, iter_boxes, parse_hdlr, parse_mdhd, parse_stsd, parse_tkhd, stts_sample_count,
+   visual_dimensions,
 };
 use crate::Result;
 use crate::errors::MediaParserError;
@@ -23,6 +24,18 @@ enum TrackKind {
    Audio,
    Subtitle,
    Unknown,
+}
+
+enum SampleEntry {
+   Visual {
+      width: Option<u32>,
+      height: Option<u32>,
+   },
+   Audio {
+      channels: Option<u16>,
+      sample_rate: Option<u32>,
+   },
+   None,
 }
 
 /// Reads all MP4 tracks from the `moov/trak` boxes.
@@ -76,7 +89,22 @@ fn parse_trak(trak: &[u8]) -> Result<TrackType> {
    let stbl = mdia.nav(&[*b"minf", *b"stbl"]);
    let stsd = stbl
       .and_then(|stbl| stbl.nav(&[*b"stsd"]))
-      .and_then(parse_stsd);
+      .and_then(|stsd| {
+         parse_stsd(stsd, |payload| match kind {
+            TrackKind::Video => {
+               let (width, height) = visual_dimensions(payload);
+               SampleEntry::Visual { width, height }
+            }
+            TrackKind::Audio => {
+               let (channels, sample_rate) = audio_params(payload);
+               SampleEntry::Audio {
+                  channels,
+                  sample_rate,
+               }
+            }
+            _ => SampleEntry::None,
+         })
+      });
    let sample_durations = stbl
       .and_then(|stbl| stbl.nav(&[*b"stts"]))
       .and_then(|stts| expand_sample_durations(stts, MAX_EXPANDED_SAMPLE_TABLE));
@@ -108,18 +136,33 @@ fn parse_trak(trak: &[u8]) -> Result<TrackType> {
    };
 
    match kind {
-      TrackKind::Video => Ok(TrackType::Video(VideoTrackMeta {
-         base,
-         width: stsd.as_ref().and_then(|s| s.width).unwrap_or(tkhd.width),
-         height: stsd.as_ref().and_then(|s| s.height).unwrap_or(tkhd.height),
-         sample_durations,
-      })),
-      TrackKind::Audio => Ok(TrackType::Audio(AudioTrackMeta {
-         base,
-         channels: stsd.as_ref().and_then(|s| s.channels).unwrap_or(0),
-         sample_rate: stsd.as_ref().and_then(|s| s.sample_rate).unwrap_or(0),
-         sample_sizes,
-      })),
+      TrackKind::Video => {
+         let (width, height) = match stsd.as_ref().map(|s| &s.entry) {
+            Some(SampleEntry::Visual { width, height }) => (*width, *height),
+            _ => (None, None),
+         };
+         Ok(TrackType::Video(VideoTrackMeta {
+            base,
+            width: width.unwrap_or(tkhd.width),
+            height: height.unwrap_or(tkhd.height),
+            sample_durations,
+         }))
+      }
+      TrackKind::Audio => {
+         let (channels, sample_rate) = match stsd.as_ref().map(|s| &s.entry) {
+            Some(SampleEntry::Audio {
+               channels,
+               sample_rate,
+            }) => (*channels, *sample_rate),
+            _ => (None, None),
+         };
+         Ok(TrackType::Audio(AudioTrackMeta {
+            base,
+            channels: channels.unwrap_or(0),
+            sample_rate: sample_rate.unwrap_or(0),
+            sample_sizes,
+         }))
+      }
       TrackKind::Subtitle => Ok(TrackType::Subtitle(SubtitleTrackMeta { base })),
       TrackKind::Unknown => Ok(TrackType::Unknown(UnknownTrackMeta { base })),
    }
