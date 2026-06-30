@@ -229,6 +229,35 @@ mod tests {
    }
 
    #[test]
+   fn test_parse_mdhd_v0() {
+      let mut mdhd = vec![0u8; 24];
+      mdhd[0] = 0;
+      mdhd[12..16].copy_from_slice(&90_000u32.to_be_bytes());
+      mdhd[16..20].copy_from_slice(&1000u32.to_be_bytes());
+      mdhd[20..22].copy_from_slice(&0x15c7u16.to_be_bytes());
+
+      let parsed = parse_mdhd(&mdhd).unwrap();
+      assert_eq!(parsed.timescale, 90_000);
+      assert_eq!(parsed.duration, 1000);
+      assert_eq!(parsed.language, Some(*b"eng"));
+   }
+
+   #[test]
+   fn test_parse_mdhd_v1_reads_64bit_duration() {
+      let mut mdhd = vec![0u8; 36];
+      mdhd[0] = 1;
+      mdhd[20..24].copy_from_slice(&48_000u32.to_be_bytes());
+      let duration = 5_000_000_000u64;
+      mdhd[24..32].copy_from_slice(&duration.to_be_bytes());
+      mdhd[32..34].copy_from_slice(&0x15c7u16.to_be_bytes());
+
+      let parsed = parse_mdhd(&mdhd).unwrap();
+      assert_eq!(parsed.timescale, 48_000);
+      assert_eq!(parsed.duration, 5_000_000_000);
+      assert_eq!(parsed.language, Some(*b"eng"));
+   }
+
+   #[test]
    fn test_parse_stsd_video_entry() {
       let mut visual_payload = vec![0u8; 78];
       visual_payload[VISUAL_WIDTH_OFFSET..VISUAL_WIDTH_OFFSET + 2]
