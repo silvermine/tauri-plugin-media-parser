@@ -3,8 +3,8 @@
 //! Reads information from each `trak` box without touching media samples.
 
 use super::atoms::{
-   Mp4Nav, audio_params, find_and_read_moov_box, fourcc_string, iter_boxes, parse_hdlr,
-   parse_mdhd, parse_stsd, parse_tkhd, stts_sample_count, visual_dimensions,
+   Mp4Nav, audio_params, find_and_read_moov_box, fourcc_string, iter_boxes, parse_hdlr, parse_mdhd,
+   parse_stsd, parse_tkhd, stts_sample_count, visual_dimensions,
 };
 use crate::Result;
 use crate::errors::MediaParserError;
