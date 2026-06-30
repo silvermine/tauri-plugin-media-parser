@@ -144,49 +144,6 @@ pub fn audio_params(payload: &[u8]) -> (Option<u16>, Option<u32>) {
    )
 }
 
-pub fn expand_sample_durations(stts: &[u8], max_samples: u32) -> Option<Vec<u32>> {
-   let entry_count = read_u32_be(stts, 4)?;
-   if entry_count <= 1 {
-      return None;
-   }
-
-   let mut total_samples = 0u32;
-   let mut offset = 8usize;
-   for _ in 0..entry_count {
-      total_samples = total_samples.checked_add(read_u32_be(stts, offset)?)?;
-      offset += 8;
-   }
-   if total_samples > max_samples {
-      return None;
-   }
-
-   let mut durations = Vec::with_capacity(total_samples as usize);
-   let mut offset = 8usize;
-   for _ in 0..entry_count {
-      let count = read_u32_be(stts, offset)?;
-      let delta = read_u32_be(stts, offset + 4)?;
-      durations.extend(std::iter::repeat_n(delta, count as usize));
-      offset += 8;
-   }
-   Some(durations)
-}
-
-pub fn expand_sample_sizes(stsz: &[u8], max_samples: u32) -> Option<Vec<u32>> {
-   let fixed_sample_size = read_u32_be(stsz, 4)?;
-   let sample_count = read_u32_be(stsz, 8)?;
-   if fixed_sample_size != 0 || sample_count > max_samples {
-      return None;
-   }
-
-   let mut sizes = Vec::with_capacity(sample_count as usize);
-   let mut offset = 12usize;
-   for _ in 0..sample_count {
-      sizes.push(read_u32_be(stsz, offset)?);
-      offset += 4;
-   }
-   Some(sizes)
-}
-
 pub fn stts_sample_count(stts: &[u8]) -> Option<u32> {
    let entry_count = read_u32_be(stts, 4)?;
    let mut total_samples = 0u32;
@@ -304,21 +261,6 @@ mod tests {
       let parsed = parse_stsd(&stsd, audio_params).unwrap();
       assert_eq!(parsed.codec, "mp4a");
       assert_eq!(parsed.entry, (Some(2), Some(44_100)));
-   }
-
-   #[test]
-   fn test_expand_sample_durations_expands_vfr_table() {
-      let mut stts = vec![0u8; 8];
-      stts[4..8].copy_from_slice(&2u32.to_be_bytes());
-      stts.extend_from_slice(&2u32.to_be_bytes());
-      stts.extend_from_slice(&100u32.to_be_bytes());
-      stts.extend_from_slice(&1u32.to_be_bytes());
-      stts.extend_from_slice(&120u32.to_be_bytes());
-
-      assert_eq!(
-         expand_sample_durations(&stts, 100_000),
-         Some(vec![100, 100, 120])
-      );
    }
 
    fn make_box(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {

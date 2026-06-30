@@ -114,7 +114,6 @@ async fn read_tracks(reader: &dyn StreamReader) -> Result<Vec<TrackType>> {
       },
       channels: if header.channel_mode == 3 { 1 } else { 2 },
       sample_rate: header.sample_rate_hz,
-      sample_sizes: None,
    })])
 }
 

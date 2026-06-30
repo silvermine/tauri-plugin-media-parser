@@ -3,9 +3,8 @@
 //! Reads information from each `trak` box without touching media samples.
 
 use super::atoms::{
-   Mp4Nav, audio_params, expand_sample_durations, expand_sample_sizes, find_and_read_moov_box,
-   fourcc_string, iter_boxes, parse_hdlr, parse_mdhd, parse_stsd, parse_tkhd, stts_sample_count,
-   visual_dimensions,
+   Mp4Nav, audio_params, find_and_read_moov_box, fourcc_string, iter_boxes, parse_hdlr,
+   parse_mdhd, parse_stsd, parse_tkhd, stts_sample_count, visual_dimensions,
 };
 use crate::Result;
 use crate::errors::MediaParserError;
@@ -15,8 +14,6 @@ use crate::types::{
    AudioTrackMeta, BaseTrackMeta, SubtitleTrackMeta, TrackType, UnknownTrackMeta, VideoTrackMeta,
 };
 use std::collections::HashMap;
-
-const MAX_EXPANDED_SAMPLE_TABLE: u32 = 100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrackKind {
@@ -105,12 +102,6 @@ fn parse_trak(trak: &[u8]) -> Result<TrackType> {
             _ => SampleEntry::None,
          })
       });
-   let sample_durations = stbl
-      .and_then(|stbl| stbl.nav(&[*b"stts"]))
-      .and_then(|stts| expand_sample_durations(stts, MAX_EXPANDED_SAMPLE_TABLE));
-   let sample_sizes = stbl
-      .and_then(|stbl| stbl.nav(&[*b"stsz"]))
-      .and_then(|stsz| expand_sample_sizes(stsz, MAX_EXPANDED_SAMPLE_TABLE));
 
    let mut properties = HashMap::new();
    properties.insert("handler_type".to_string(), fourcc_string(handler));
@@ -145,7 +136,6 @@ fn parse_trak(trak: &[u8]) -> Result<TrackType> {
             base,
             width: width.unwrap_or(tkhd.width),
             height: height.unwrap_or(tkhd.height),
-            sample_durations,
          }))
       }
       TrackKind::Audio => {
@@ -160,7 +150,6 @@ fn parse_trak(trak: &[u8]) -> Result<TrackType> {
             base,
             channels: channels.unwrap_or(0),
             sample_rate: sample_rate.unwrap_or(0),
-            sample_sizes,
          }))
       }
       TrackKind::Subtitle => Ok(TrackType::Subtitle(SubtitleTrackMeta { base })),
