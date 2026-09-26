@@ -33,6 +33,11 @@ pub fn initialize_android_jpeg(vm: JavaVM, stream_class: GlobalRef) -> Result<()
          .attach_current_thread()
          .map_err(|error| error.to_string())?;
       let class: &JClass = stream_class.as_obj().into();
+      match env.is_assignable_from(class, "java/io/OutputStream") {
+         Ok(true) => (),
+         Ok(false) => return Err("stream class must extend java.io.OutputStream".into()),
+         Err(error) => return Err(jni_error(&mut env, error).to_string()),
+      }
       let validation = (|| -> jni::errors::Result<()> {
          env.get_method_id(class, "<init>", "(I)V")?;
          env.get_method_id(class, "toByteArray", "()[B")?;
@@ -140,6 +145,7 @@ pub(super) fn encode_jpeg(
             ]
          ));
          let bitmap = call!(bitmap.l());
+         call!(env.delete_local_ref(pixels));
          let encoded = (|| {
             let compressed = env
                .call_method(
