@@ -7,19 +7,29 @@ public final class Harness {
 
     public static void main(String[] args) {
         try {
-            if (args.length != 2) throw new IllegalArgumentException("library and mode required");
+            if (args.length != 2) {
+                throw new IllegalArgumentException("library and mode required");
+            }
             System.load(args[0]);
             String mode = args[1];
             if (mode.equals("failed-bootstrap")) {
-                if (init(String.class) == 0) throw new AssertionError("invalid bootstrap accepted");
+                if (init(String.class) == 0) {
+                    throw new AssertionError("invalid bootstrap accepted");
+                }
                 System.exit(run("missing-runtime"));
             }
-            if (mode.equals("missing-runtime")) System.exit(run(mode));
+            if (mode.equals("missing-runtime")) {
+                System.exit(run(mode));
+            }
             if (!mode.equals("normal") && !mode.equals("negative")) {
                 throw new IllegalArgumentException("unknown mode " + mode);
             }
-            if (mode.equals("normal")) BoundedStreamCases.run();
-            if (init(FaultInjectingStream.class) != 0) throw new AssertionError("bootstrap failed");
+            if (mode.equals("normal")) {
+                BoundedStreamCases.run();
+            }
+            if (init(FaultInjectingStream.class) != 0) {
+                throw new AssertionError("bootstrap failed");
+            }
             System.exit(run(mode));
         } catch (Throwable failure) {
             failure.printStackTrace();

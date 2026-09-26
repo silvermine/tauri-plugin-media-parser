@@ -13,7 +13,9 @@ open class BoundedJpegOutputStream(private val maximum: Int) : OutputStream() {
     init { require(maximum >= 0) }
 
     private fun reserve(count: Int) {
-        if (failure != 0) throw IOException("JPEG stream already failed")
+        if (failure != 0) {
+            throw IOException("JPEG stream already failed")
+        }
         if (count > maximum - size) {
             failure = 1
             throw IOException("JPEG output is too large")
@@ -38,14 +40,18 @@ open class BoundedJpegOutputStream(private val maximum: Int) : OutputStream() {
     }
 
     override fun write(bytes: ByteArray, offset: Int, count: Int) {
-        if (offset < 0 || count < 0 || offset > bytes.size - count) throw IndexOutOfBoundsException()
+        if (offset < 0 || count < 0 || offset > bytes.size - count) {
+            throw IndexOutOfBoundsException()
+        }
         reserve(count)
         System.arraycopy(bytes, offset, data, size, count)
         size += count
     }
 
     fun toByteArray(): ByteArray {
-        if (failure != 0) throw IOException("JPEG stream already failed")
+        if (failure != 0) {
+            throw IOException("JPEG stream already failed")
+        }
         try { return copyBuffer(size) }
         catch (error: OutOfMemoryError) {
             failure = 2

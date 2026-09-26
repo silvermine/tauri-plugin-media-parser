@@ -11,7 +11,9 @@ class FaultInjectingStream(maximum: Int) : BoundedJpegOutputStream(maximum) {
     override fun copyBuffer(capacity: Int): ByteArray {
         copies++
         val selected = mode.get() ?: 0
-        if (selected == 1 || (selected == 2 && capacity == size)) throw OutOfMemoryError("injected allocation failure")
+        if (selected == 1 || (selected == 2 && capacity == size)) {
+            throw OutOfMemoryError("injected allocation failure")
+        }
         return super.copyBuffer(capacity)
     }
 }

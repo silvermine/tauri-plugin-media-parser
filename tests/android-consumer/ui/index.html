@@ -11,13 +11,21 @@ async function checkThumbnail(source) {
   const bytes = response instanceof ArrayBuffer ? new Uint8Array(response) : new Uint8Array(response);
   const size = new DataView(bytes.buffer).getUint32(0, true);
   const header = JSON.parse(new TextDecoder().decode(bytes.subarray(4, 4 + size)));
-  if (header.version !== 1 || header.entries.length !== 1) throw new Error('invalid envelope');
+  if (header.version !== 1 || header.entries.length !== 1) {
+    throw new Error('invalid envelope');
+  }
   const entry = header.entries[0];
-  if (entry.width !== 320 || entry.height !== 180) throw new Error('invalid dimensions');
+  if (entry.width !== 320 || entry.height !== 180) {
+    throw new Error('invalid dimensions');
+  }
   const jpeg = bytes.subarray(4 + size + entry.offset, 4 + size + entry.offset + entry.length);
-  if (jpeg[0] !== 255 || jpeg[1] !== 216 || jpeg[jpeg.length-2] !== 255 || jpeg[jpeg.length-1] !== 217) throw new Error('invalid JPEG');
+  if (jpeg[0] !== 255 || jpeg[1] !== 216 || jpeg[jpeg.length-2] !== 255 || jpeg[jpeg.length-1] !== 217) {
+    throw new Error('invalid JPEG');
+  }
   const bitmap = await createImageBitmap(new Blob([jpeg], {type: 'image/jpeg'}));
-  if (bitmap.width !== 320 || bitmap.height !== 180) throw new Error('undecodable dimensions');
+  if (bitmap.width !== 320 || bitmap.height !== 180) {
+    throw new Error('undecodable dimensions');
+  }
   bitmap.close();
   return jpeg.length;
 }
