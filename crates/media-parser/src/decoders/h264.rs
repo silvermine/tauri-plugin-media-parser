@@ -42,7 +42,7 @@ mod frame;
 #[cfg(feature = "thumbnails")]
 mod jpeg;
 #[cfg(feature = "thumbnails")]
-mod pipeline;
+pub(crate) mod pipeline;
 
 #[cfg(not(any(
    apple_videotoolbox_backend,
@@ -102,39 +102,8 @@ impl Default for ThumbnailSize {
    }
 }
 
-/// JPEG quality for encoded thumbnails, constrained to the encoder's 1–100
-/// range so an out-of-range value cannot reach `jpeg_encoder`.
-///
-/// This knob trades size, not time: encoding a 1080p frame costs ~11 ms at
-/// q40 and ~14 ms at q85, while the output grows from ~47 KiB to ~201 KiB.
-/// Note that `jpeg_encoder` switches to 4:2:0 chroma subsampling below q90,
-/// so 89 → 90 is a visible step rather than a smooth one.
 #[cfg(feature = "thumbnails")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct JpegQuality(u8);
-
-#[cfg(feature = "thumbnails")]
-impl JpegQuality {
-   /// Thumbnail-grade default: ~64 KiB for a 1080p frame, where the size
-   /// curve is still cheap.
-   pub const DEFAULT: Self = Self(60);
-
-   /// Returns `None` unless `quality` is within the encoder's 1–100 range.
-   pub fn new(quality: u8) -> Option<Self> {
-      (1..=100).contains(&quality).then_some(Self(quality))
-   }
-
-   pub fn get(self) -> u8 {
-      self.0
-   }
-}
-
-#[cfg(feature = "thumbnails")]
-impl Default for JpegQuality {
-   fn default() -> Self {
-      Self::DEFAULT
-   }
-}
+pub use crate::encoders::jpeg::JpegQuality;
 
 #[cfg(feature = "thumbnails")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -351,20 +320,6 @@ mod tests {
          resolved_codec_dimensions: None,
       }
    }
-   #[test]
-   fn rejects_quality_outside_the_encoder_range() {
-      assert_eq!(JpegQuality::new(0), None);
-      assert_eq!(JpegQuality::new(101), None);
-      assert_eq!(JpegQuality::new(1).map(JpegQuality::get), Some(1));
-      assert_eq!(JpegQuality::new(100).map(JpegQuality::get), Some(100));
-   }
-
-   #[test]
-   fn defaults_to_thumbnail_grade_quality() {
-      assert_eq!(JpegQuality::default(), JpegQuality::DEFAULT);
-      assert_eq!(JpegQuality::default().get(), 60);
-   }
-
    #[test]
    fn prepares_the_resolved_range_only_on_the_job_clone() {
       let config = AvcConfig {
