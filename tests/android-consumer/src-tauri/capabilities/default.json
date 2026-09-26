@@ -1,5 +1,5 @@
 {
-  "identifier": "default",
-  "windows": ["main"],
-  "permissions": ["core:default", "media-parser:default"]
+   "identifier": "default",
+   "windows": ["main"],
+   "permissions": ["core:default", "media-parser:default"]
 }
