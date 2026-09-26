@@ -22,7 +22,7 @@ if [ -z "$ndk_root" ] || [ ! -d "$ndk_root" ]; then
    exit 1
 fi
 
-for required_command in awk basename cargo date flock grep jq mktemp sed sort tail timeout tr; do
+for required_command in awk basename cargo curl date flock grep java javac jar jq mktemp sed sha256sum sort tail timeout tr unzip; do
    if ! command -v "$required_command" >/dev/null 2>&1; then
       echo "$required_command is required" >&2
       exit 1
@@ -63,6 +63,7 @@ emulator_log=$(mktemp)
 emulator_pid=
 emulator_serial=
 build_output=
+jvm_work=
 run_log=
 remote_dir=
 remote_identity_file=
@@ -128,6 +129,9 @@ cleanup() {
    fi
    if [ -n "$run_log" ]; then
       rm -f "$run_log"
+   fi
+   if [ -n "$jvm_work" ]; then
+      rm -rf "$jvm_work"
    fi
    rm -f "$emulator_log"
 }
@@ -267,13 +271,13 @@ remote_identity_file="$remote_dir/test.identity"
 timeout 10 "$adb" -s "$emulator_serial" shell mkdir -p "$remote_fixtures"
 timeout 60 "$adb" -s "$emulator_serial" push "$workspace_root/crates/media-parser/tests/fixtures/." "$remote_fixtures/" >/dev/null
 
-cargo test \
+cargo test --locked \
    --manifest-path "$workspace_root/Cargo.toml" \
    -p media-parser \
    --target x86_64-linux-android \
    --no-default-features \
    --features thumbnails,android-mediacodec \
-   --lib --test android_mediacodec --test mp4_thumbnails \
+   --lib \
    --no-run \
    --message-format=json-render-diagnostics >"$build_output"
 
@@ -294,12 +298,20 @@ run_test() {
    remote_binary="$remote_dir/$(basename "$test_binary")"
    timeout 60 "$adb" -s "$emulator_serial" push "$test_binary" "$remote_binary" >/dev/null
    timeout 10 "$adb" -s "$emulator_serial" shell chmod 755 "$remote_binary"
+   run_remote "$target_name" "$remote_binary --test-threads=1" 0
+}
+
+run_remote() {
+   target_name=$1
+   remote_command=$2
+   expected_status=$3
    # `adb shell` reports the shell's exit status, not the test binary's, so the
    # status is echoed and read back from the captured output.
+   [ -z "$run_log" ] || rm -f "$run_log"
    run_log=$(mktemp)
    adb_status=0
    timeout "$test_timeout" "$adb" -s "$emulator_serial" shell \
-      "sh -c 'test_pid=\$\$; test_start=\$(cut -d \" \" -f 22 /proc/\$\$/stat) || exit 125; printf \"%s %s\\n\" \"\$test_pid\" \"\$test_start\" >$remote_identity_file; exec env MEDIA_PARSER_TEST_FIXTURES=$remote_fixtures $remote_binary --test-threads=1' & test_pid=\$!; wait \"\$test_pid\"; test_status=\$?; rm -f $remote_identity_file; printf '\nEXIT=%s\n' \"\$test_status\"" \
+      "sh -c 'test_pid=\$\$; test_start=\$(cut -d \" \" -f 22 /proc/\$\$/stat) || exit 125; printf \"%s %s\\n\" \"\$test_pid\" \"\$test_start\" >$remote_identity_file; exec env TMPDIR=$remote_dir MEDIA_PARSER_TEST_FIXTURES=$remote_fixtures $remote_command' & test_pid=\$!; wait \"\$test_pid\"; test_status=\$?; rm -f $remote_identity_file; printf '\nEXIT=%s\n' \"\$test_status\"" \
       >"$run_log" 2>&1 || adb_status=$?
    if [ "$adb_status" -ne 0 ]; then
       stop_remote_test
@@ -309,8 +321,6 @@ run_test() {
    fi
    cat "$run_log"
    status=$(tr -d '\r' <"$run_log" | sed -n 's/^EXIT=//p' | tail -n 1)
-   rm -f "$run_log"
-   run_log=
    case "$status" in
       ''|*[!0-9]*)
          echo "$target_name returned an invalid device status: ${status:-missing}" >&2
@@ -321,12 +331,102 @@ run_test() {
       echo "$target_name returned an invalid device status: $status" >&2
       exit 1
    fi
-   if [ "$status" != 0 ]; then
+   if [ "$status" != "$expected_status" ]; then
       echo "$target_name failed on the emulator with status ${status:-unknown}" >&2
-      exit "$status"
+      exit 1
    fi
 }
 
 run_test media_parser
-run_test android_mediacodec
-run_test mp4_thumbnails
+
+# The normal native executable retains pure tests; JPEG-dependent cases run below.
+if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$run_log"; then
+   echo "Pure Rust suite missing or skipped tests" >&2
+   exit 1
+fi
+jvm_work=$(mktemp -d)
+kotlin_version=1.9.25
+kotlin_sha256=6ab72d6144e71cbbc380b770c2ad380972548c63ab6ed4c79f11c88f2967332e
+kotlin_home=${KOTLIN_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/media-parser-android/kotlin-$kotlin_version/kotlinc}
+if [ ! -x "$kotlin_home/bin/kotlinc" ]; then
+   if [ -n "${KOTLIN_HOME:-}" ]; then
+      echo "KOTLIN_HOME does not contain bin/kotlinc" >&2
+      exit 1
+   fi
+   kotlin_cache=$(dirname "$kotlin_home")
+   mkdir -p "$kotlin_cache"
+   kotlin_url="https://github.com/JetBrains/kotlin/releases/download/v$kotlin_version/kotlin-compiler-$kotlin_version.zip"
+   curl -fL --retry 2 "$kotlin_url" -o "$jvm_work/kotlin.zip"
+   printf '%s  %s\n' "$kotlin_sha256" "$jvm_work/kotlin.zip" | sha256sum -c -
+   unzip -q -o "$jvm_work/kotlin.zip" -d "$kotlin_cache"
+fi
+android_jar=$(find "$sdk_root/platforms" -name android.jar | sort -V | tail -n 1)
+d8=$(find "$sdk_root/build-tools" -name d8 | sort -V | tail -n 1)
+if [ -z "$android_jar" ] || [ -z "$d8" ]; then
+   echo "An installed Android platform and build-tools/d8 are required" >&2
+   exit 1
+fi
+mkdir -p "$jvm_work/classes" "$jvm_work/dex"
+"$kotlin_home/bin/kotlinc" -jvm-target 1.8 -classpath "$android_jar" \
+   "$workspace_root/android/src/main/java/com/plugin/mediaparser/BoundedJpegOutputStream.kt" \
+   "$workspace_root/crates/media-parser/tests/android_jvm/BoundedStreamCases.kt" \
+   -d "$jvm_work/classes"
+javac --release 8 -classpath "$jvm_work/classes:$kotlin_home/lib/kotlin-stdlib.jar:$android_jar" \
+   -d "$jvm_work/classes" "$workspace_root/crates/media-parser/tests/android_jvm/Harness.java"
+jar cf "$jvm_work/harness.jar" -C "$jvm_work/classes" .
+"$d8" --min-api 24 --lib "$android_jar" --output "$jvm_work/dex" \
+   "$jvm_work/harness.jar" "$kotlin_home/lib/kotlin-stdlib.jar"
+cargo rustc --locked --manifest-path "$workspace_root/Cargo.toml" -p media-parser \
+   --target x86_64-linux-android --lib --features thumbnails,android-mediacodec,android-jvm-test-harness \
+   --message-format=json-render-diagnostics --crate-type cdylib >"$build_output"
+jvm_library=$(jq -r 'select(.target.name == "media_parser") | .filenames[]? | select(endswith(".so"))' "$build_output" | tail -n 1)
+if [ -z "$jvm_library" ]; then
+   echo "Cargo did not produce the JVM test library" >&2
+   exit 1
+fi
+timeout 60 "$adb" -s "$emulator_serial" push "$jvm_library" "$remote_dir/libmedia_parser.so" >/dev/null
+timeout 60 "$adb" -s "$emulator_serial" push "$jvm_work/dex/classes.dex" "$remote_dir/classes.dex" >/dev/null
+
+run_jvm() {
+   mode=$1
+   expected_status=$2
+   run_remote "JVM $mode" "CLASSPATH=$remote_dir/classes.dex app_process $remote_dir com.plugin.mediaparser.Harness $remote_dir/libmedia_parser.so $mode" "$expected_status"
+   if [ "$expected_status" != 0 ]; then
+      grep -q '^test intentional_failure \.\.\. FAILED' "$run_log"
+      echo "PASS deliberate Rust failure propagated through JVM to shell"
+      return
+   fi
+   tr -d '\r' <"$run_log" | sed -n 's/^EXPECTED //p' | sort >"$jvm_work/expected"
+   tr -d '\r' <"$run_log" | sed -n 's/^test \(.*\) \.\.\. ok$/\1/p' | sort >"$jvm_work/actual"
+   if [ ! -s "$jvm_work/expected" ] || ! cmp -s "$jvm_work/expected" "$jvm_work/actual" ||
+      [ "$(sort -u "$jvm_work/expected" | wc -l)" != "$(wc -l <"$jvm_work/expected")" ]; then
+      echo "JVM expected/executed case lists differ, are empty, or contain duplicates" >&2
+      exit 1
+   fi
+   count=$(sed -n 's/^JVM_TESTS=//p' "$run_log" | tr -d '\r')
+   if [ "$count" != "$(wc -l <"$jvm_work/actual" | tr -d ' ')" ]; then
+      echo "JVM case count mismatch" >&2
+      exit 1
+   fi
+   if [ "$mode" = normal ]; then
+      # Independent coverage inventory: every extracted original body must appear.
+      sed -n 's/.*pub(crate) .*fn \([a-zA-Z0-9_]*\)_case().*/\1/p' \
+         "$workspace_root/crates/media-parser/tests/android_mediacodec.rs" \
+         "$workspace_root/crates/media-parser/tests/mp4_thumbnails.rs" \
+         "$workspace_root/crates/media-parser/src/decoders/h264/pipeline.rs" \
+         "$workspace_root/crates/media-parser/src/format/mp4/thumbnails.rs" | sort >"$jvm_work/original"
+      test "$(wc -l <"$jvm_work/original" | tr -d ' ')" = 31
+      sed 's/.*:://' "$jvm_work/actual" | sort >"$jvm_work/short-names"
+      while IFS= read -r case_name; do
+         if ! grep -qx "$case_name" "$jvm_work/short-names"; then
+            echo "Missing original JVM case: $case_name" >&2
+            exit 1
+         fi
+      done <"$jvm_work/original"
+   fi
+}
+
+run_jvm missing-runtime 0
+run_jvm failed-bootstrap 0
+run_jvm negative 1
+run_jvm normal 0
