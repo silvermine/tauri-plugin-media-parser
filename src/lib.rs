@@ -47,7 +47,7 @@
 use std::collections::HashMap;
 use tauri::{Manager, Runtime, plugin::TauriPlugin};
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 mod android_jpeg;
 mod commands;
 mod envelope;

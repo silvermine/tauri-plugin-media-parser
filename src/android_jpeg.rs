@@ -1,11 +1,14 @@
+#[cfg(target_os = "android")]
 use std::sync::{
    Arc,
    atomic::{AtomicBool, Ordering},
 };
+#[cfg(target_os = "android")]
 use tauri::{Manager, Runtime, Webview};
 
 #[derive(Clone)]
 pub(crate) struct AndroidJpeg {
+   #[cfg(target_os = "android")]
    started: Arc<AtomicBool>,
    result: tokio::sync::watch::Sender<Option<std::result::Result<(), String>>>,
 }
@@ -13,6 +16,7 @@ pub(crate) struct AndroidJpeg {
 impl Default for AndroidJpeg {
    fn default() -> Self {
       Self {
+         #[cfg(target_os = "android")]
          started: Arc::new(AtomicBool::new(false)),
          result: tokio::sync::watch::channel(None).0,
       }
@@ -39,6 +43,7 @@ impl AndroidJpeg {
    }
 }
 
+#[cfg(target_os = "android")]
 pub(crate) fn on_webview_ready<R: Runtime>(webview: Webview<R>) {
    let state = webview
       .state::<crate::commands::ThumbnailSessions>()
@@ -78,5 +83,38 @@ pub(crate) fn on_webview_ready<R: Runtime>(webview: Webview<R>) {
       state
          .result
          .send_replace(Some(Err(format!("Android JPEG WebView dispatch: {error}"))));
+   }
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   #[tokio::test]
+   async fn wait_propagates_stored_error() {
+      let state = AndroidJpeg::default();
+      state
+         .result
+         .send_replace(Some(Err("bootstrap failed".to_owned())));
+
+      let error = state.wait().await.expect_err("stored error should fail");
+
+      assert!(matches!(
+         error,
+         crate::Error::Custom(message) if message == "bootstrap failed"
+      ));
+   }
+
+   #[tokio::test(start_paused = true)]
+   async fn wait_times_out() {
+      let error = AndroidJpeg::default()
+         .wait()
+         .await
+         .expect_err("missing bootstrap result should time out");
+
+      assert!(matches!(
+         error,
+         crate::Error::Custom(message) if message == "Android JPEG bootstrap timed out"
+      ));
    }
 }

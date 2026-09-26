@@ -346,6 +346,7 @@ if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$run
 fi
 jvm_work=$(mktemp -d)
 kotlin_version=1.9.25
+kotlin_sha256=6ab72d6144e71cbbc380b770c2ad380972548c63ab6ed4c79f11c88f2967332e
 kotlin_home=${KOTLIN_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/media-parser-android/kotlin-$kotlin_version/kotlinc}
 if [ ! -x "$kotlin_home/bin/kotlinc" ]; then
    if [ -n "${KOTLIN_HOME:-}" ]; then
@@ -356,9 +357,7 @@ if [ ! -x "$kotlin_home/bin/kotlinc" ]; then
    mkdir -p "$kotlin_cache"
    kotlin_url="https://github.com/JetBrains/kotlin/releases/download/v$kotlin_version/kotlin-compiler-$kotlin_version.zip"
    curl -fL --retry 2 "$kotlin_url" -o "$jvm_work/kotlin.zip"
-   curl -fL --retry 2 "$kotlin_url.sha256" -o "$jvm_work/kotlin.sha256"
-   expected_sha=$(cat "$jvm_work/kotlin.sha256")
-   printf '%s  %s\n' "$expected_sha" "$jvm_work/kotlin.zip" | sha256sum -c -
+   printf '%s  %s\n' "$kotlin_sha256" "$jvm_work/kotlin.zip" | sha256sum -c -
    unzip -q -o "$jvm_work/kotlin.zip" -d "$kotlin_cache"
 fi
 android_jar=$(find "$sdk_root/platforms" -name android.jar | sort -V | tail -n 1)
