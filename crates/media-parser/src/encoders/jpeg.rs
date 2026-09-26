@@ -5,14 +5,24 @@
 //! limit or an allocation failure keeps its first cause and never yields a
 //! partial JPEG.
 
-use crate::decoders::h264::DecodeError;
-
 #[cfg(any(test, not(target_os = "android")))]
 mod sink;
 #[cfg(not(target_os = "android"))]
 use sink::FallibleJpegWriter;
 
 const MAX_JPEG_BYTES: usize = 64 * 1024 * 1024;
+
+/// Failures produced while encoding an RGB image as JPEG.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub(crate) enum JpegError {
+   /// Invalid input or a failure reported by the native encoder.
+   #[error("{0}")]
+   Encode(String),
+   #[error("{0}")]
+   OutputLimit(String),
+   #[error("{0}")]
+   ResourceLimit(String),
+}
 
 /// JPEG quality for encoded thumbnails, constrained to 1–100 so an
 /// out-of-range value cannot reach the platform encoder.
@@ -48,7 +58,19 @@ pub(crate) fn encode_jpeg(
    width: usize,
    height: usize,
    quality: JpegQuality,
-) -> Result<Vec<u8>, DecodeError> {
+) -> Result<Vec<u8>, JpegError> {
+   let width_u16 = u16::try_from(width)
+      .map_err(|_| JpegError::Encode("image width exceeds JPEG limits".into()))?;
+   let height_u16 = u16::try_from(height)
+      .map_err(|_| JpegError::Encode("image height exceeds JPEG limits".into()))?;
+   let expected_len = usize::from(width_u16)
+      .checked_mul(usize::from(height_u16))
+      .and_then(|pixels| pixels.checked_mul(3));
+   if width == 0 || height == 0 || Some(rgb.len()) != expected_len {
+      return Err(JpegError::Encode(
+         "invalid JPEG RGB dimensions or buffer length".into(),
+      ));
+   }
    #[cfg(target_os = "android")]
    return android::encode_jpeg(rgb, width, height, quality, MAX_JPEG_BYTES);
    #[cfg(all(target_os = "windows", feature = "windows-media-foundation"))]
@@ -59,23 +81,10 @@ pub(crate) fn encode_jpeg(
       quality,
       FallibleJpegWriter::new(MAX_JPEG_BYTES),
    );
-   #[cfg(not(any(
-      target_os = "android",
-      all(target_os = "windows", feature = "windows-media-foundation")
-   )))]
+   #[cfg(apple_videotoolbox_backend)]
    {
       let mut output = FallibleJpegWriter::new(MAX_JPEG_BYTES);
-      #[cfg(apple_videotoolbox_backend)]
       let result = apple::encode_jpeg(rgb, width, height, quality, &mut output);
-      // Without a native backend no decoder produces frames, so this is unreachable
-      // outside tests that exercise the shared validation above.
-      #[cfg(not(apple_videotoolbox_backend))]
-      let result = {
-         let _ = (rgb, width, height, quality);
-         Err(DecodeError::UnsupportedFormat(
-            "JPEG encoding requires a native platform encoder".into(),
-         ))
-      };
       output.finish(result)
    }
 }
@@ -120,7 +129,7 @@ mod tests {
    fn android_requires_bootstrap() {
       assert!(
          matches!(encode_jpeg(&mut [255, 0, 0], 1, 1, JpegQuality::default()),
-         Err(DecodeError::Convert(message)) if message.contains("runtime is not initialized"))
+         Err(JpegError::Encode(message)) if message.contains("runtime is not initialized"))
       );
    }
 
@@ -128,6 +137,22 @@ mod tests {
    fn quality_uses_unit_interval() {
       for (quality, expected) in [(1, 0.01), (60, 0.6), (100, 1.0)] {
          assert_eq!(quality_unit(JpegQuality::new(quality).unwrap()), expected);
+      }
+   }
+
+   #[test]
+   fn encoder_rejects_invalid_rgb() {
+      for (width, height, len) in [
+         (0, 1, 0),
+         (1, 0, 0),
+         (1, 1, 2),
+         (1, 1, 4),
+         (usize::MAX, 1, 3),
+      ] {
+         assert!(matches!(
+            encode_jpeg(&mut vec![0; len], width, height, JpegQuality::default()),
+            Err(JpegError::Encode(_))
+         ));
       }
    }
 }
