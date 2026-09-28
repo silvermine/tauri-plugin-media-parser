@@ -193,6 +193,35 @@ Same-origin redirects keep the headers. Both policies allow up to ten hops.
 Blocked redirects return `cross-origin redirect blocked: same-origin policy
 enforced` for both HEAD and GET requests.
 
+### Use from Rust
+
+The plugin re-exports the `media-parser` crate, so Rust code can call the parser
+directly without a second dependency:
+
+```rust
+use tauri_plugin_media_parser::media_parser::{FileStreamReader, MediaParser};
+
+let parser = MediaParser::new(FileStreamReader::new("video.mp4")?);
+let metadata = parser.metadata().await?;
+```
+
+Don't also depend on `media-parser` directly. A mismatched source or `rev` builds a
+second copy of the crate, and on Android that copy's JPEG runtime is never initialized.
+
+The thumbnail API (`format::mp4::ThumbnailIndex` and related items) is only compiled
+on Android, Windows, macOS, and iOS. Gate its use on the same targets:
+
+```rust
+#[cfg(any(
+    target_os = "android",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "ios"
+))]
+```
+
+On Android, the plugin initializes JPEG encoding when its first webview is ready.
+
 ### JavaScript/TypeScript API
 
 Install the JavaScript package in your frontend:

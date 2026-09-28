@@ -57,6 +57,7 @@ mod source;
 mod subtitle_command;
 
 pub use error::{Error, Result};
+pub use media_parser;
 
 #[cfg(target_os = "ios")]
 unsafe extern "C" {
