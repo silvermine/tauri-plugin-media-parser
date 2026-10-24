@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 
 import { decodeEnvelope } from './envelope';
 import { decodeSubtitleEnvelope } from './subtitle-envelope';
@@ -8,6 +8,8 @@ import type {
    CoverInfo,
    Metadata,
    MetadataOptions,
+   StreamedThumbnailInfo,
+   StreamThumbnailsOptions,
    SubtitleInfo,
    SubtitleOptions,
    ThumbnailInfo,
@@ -147,6 +149,169 @@ export async function getThumbnails(
    });
 
    return decodeThumbnailEnvelope(raw);
+}
+
+/**
+ * Like {@link getThumbnails}, but hands each thumbnail to
+ * `options.onThumbnail` as soon as its GOP is decoded instead of waiting for
+ * all of them.
+ *
+ * Thumbnails arrive in file order; each carries `indices`, the positions in
+ * `timestamps` it answers. The promise resolves once the backend reports the
+ * end of the stream and every position has been answered. It rejects if the
+ * backend fails, a message is malformed, or `onThumbnail` throws; thumbnails
+ * already delivered stay valid and no more are delivered. Samples are still
+ * read before the first decode, so a remote URL waits before the first
+ * thumbnail.
+ *
+ * A rejection also asks the backend to cancel the extraction, without waiting
+ * for it. Cancelling stops new decoder submissions and deliveries, but work
+ * already submitted to the native decoder can still finish, so there is no
+ * bound on how soon the extraction slot is released. Reloading the page or
+ * closing its window cancels the webview's streams on a best-effort basis: a
+ * stream request from the old page that reaches the backend after the reload
+ * or close is not cancelled.
+ *
+ * If the webview drops a channel message (for example, when the window closes
+ * mid-stream), the promise can stay pending: Tauri does not report that loss.
+ *
+ * @param source - Absolute path to a local file or URL of a remote media file
+ * @param options - The {@link getThumbnails} options plus `onThumbnail`
+ * @returns A promise that resolves without a value after the end-of-stream
+ * message is received and every timestamp has been answered
+ * @throws TypeError for the same invalid options as {@link getThumbnails}
+ */
+export async function streamThumbnails(
+   source: string,
+   options: StreamThumbnailsOptions,
+): Promise<void> {
+   validateTimestamps(options.timestamps);
+   validateQuality(options.quality);
+   validateThumbnailDimensions(options.maxWidth, options.maxHeight);
+
+   const total = options.timestamps.length;
+   const answered = new Array<boolean>(total).fill(false);
+   let received = 0;
+   let settled = false;
+   let resolveDone!: () => void;
+   let rejectDone!: (reason: unknown) => void;
+   const done = new Promise<void>((resolve, reject) => {
+      resolveDone = resolve;
+      rejectDone = reject;
+   });
+
+   const fail = (reason: unknown): void => {
+      if (settled) {
+         return;
+      }
+      settled = true;
+      rejectDone(reason);
+      // Not awaited, and its own failure is moot: the stream has already failed.
+      invoke('plugin:media-parser|cancel_thumbnail_stream', { channelId: channel.id })
+         .catch(() => undefined);
+   };
+   const finish = (terminal: StreamTerminal): void => {
+      if ('error' in terminal) {
+         // The same serialized error a rejected invoke would carry.
+         fail(terminal.error);
+         return;
+      }
+      if (terminal.done !== received || answered.includes(false)) {
+         fail(new TypeError('Thumbnail stream did not answer every timestamp exactly once.'));
+         return;
+      }
+      settled = true;
+      resolveDone();
+   };
+
+   // The Channel handler must return normally, or later messages stall.
+   const channel = new Channel<unknown>((message) => {
+      if (settled) {
+         return;
+      }
+      try {
+         if (!isStreamBytes(message)) {
+            finish(readStreamTerminal(message));
+            return;
+         }
+         const thumbnail = decodeStreamedThumbnail(streamBytes(message), answered);
+         received += 1;
+         options.onThumbnail(thumbnail);
+      } catch (error) {
+         fail(error);
+      }
+   });
+
+   // Not awaited: the stream settles through its terminal channel message.
+   invoke<null>('plugin:media-parser|stream_thumbnails', {
+      source,
+      timestamps: options.timestamps,
+      trackId: options.trackId,
+      accurate: options.accurate,
+      quality: options.quality,
+      maxWidth: options.maxWidth,
+      maxHeight: options.maxHeight,
+      headers: options.headers,
+      onThumbnail: channel,
+   }).catch((error: unknown) => {
+      // shortcut: pre-handler failures have no channel end in Tauri 2.12.0; recheck on upgrade.
+      // @ts-expect-error Tauri exposes cleanupCallback at runtime but declares it private.
+      channel.cleanupCallback();
+      fail(error);
+   });
+   return done;
+}
+
+type StreamTerminal = { done: number } | { error: string };
+
+/**
+ * A thumbnail envelope arrives as an `ArrayBuffer`, or as a byte array on IPC
+ * fallback paths; the stream's terminal arrives as JSON.
+ */
+function isStreamBytes(message: unknown): message is ArrayBuffer | Uint8Array | number[] {
+   return message instanceof ArrayBuffer || message instanceof Uint8Array || Array.isArray(message);
+}
+
+function streamBytes(message: ArrayBuffer | Uint8Array | number[]): ArrayBuffer | Uint8Array {
+   return Array.isArray(message) ? Uint8Array.from(message) : message;
+}
+
+/** Accepts only `{ done: <count> }` or `{ error: <message> }`. */
+function readStreamTerminal(message: unknown): StreamTerminal {
+   if (typeof message === 'object' && message !== null && Object.keys(message).length === 1) {
+      const terminal = message as Record<string, unknown>;
+      if (Number.isSafeInteger(terminal.done) && (terminal.done as number) >= 0) {
+         return { done: terminal.done as number };
+      }
+      if (typeof terminal.error === 'string') {
+         return { error: terminal.error };
+      }
+   }
+   throw new TypeError('Thumbnail stream sent an unexpected message.');
+}
+
+/**
+ * Decodes one stream message and marks the positions it answers, rejecting
+ * anything but a single entry with fresh, in-range `indices`.
+ */
+function decodeStreamedThumbnail(
+   raw: ArrayBuffer | Uint8Array,
+   answered: boolean[],
+): StreamedThumbnailInfo {
+   const entries = decodeEnvelope<Omit<StreamedThumbnailInfo, 'data'>>(raw);
+   const [thumbnail] = entries;
+   if (entries.length !== 1 || !Array.isArray(thumbnail.indices) ||
+       thumbnail.indices.length === 0) {
+      throw new TypeError('Thumbnail stream message must hold one entry with indices.');
+   }
+   for (const index of thumbnail.indices) {
+      if (!Number.isSafeInteger(index) || index < 0 || index >= answered.length ||
+          answered[index]) {
+         throw new TypeError(`Thumbnail stream sent an invalid index: ${String(index)}.`);
+      }
+      answered[index] = true;
+   }
+   return thumbnail;
 }
 
 /**

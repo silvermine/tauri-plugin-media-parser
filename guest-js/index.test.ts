@@ -3,6 +3,7 @@ import {
    getMetadata,
    getSubtitles,
    getThumbnails,
+   streamThumbnails,
    type CoverInfo,
    type Metadata,
    type SubtitleCueInfo,
@@ -34,6 +35,23 @@ expectType<Promise<ThumbnailInfo[]>>(
       headers: { Authorization: 'Bearer token' },
    }),
 );
+
+expectType<Promise<void>>(
+   streamThumbnails('/video.mp4', {
+      timestamps: [0, 250],
+      accurate: true,
+      onThumbnail: (thumbnail) => {
+         expectType<number[]>(thumbnail.indices);
+         expectType<Uint8Array>(thumbnail.data);
+      },
+   }),
+);
+
+void streamThumbnails('/video.mp4', {
+   timestamps: [0],
+   // @ts-expect-error The stream would discard the returned promise.
+   onThumbnail: async () => {},
+});
 
 declare const cover: CoverInfo;
 expectType<Uint8Array>(cover.data);

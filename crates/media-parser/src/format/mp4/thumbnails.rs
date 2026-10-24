@@ -14,13 +14,13 @@ use super::index_build_parallelism;
 use super::sample_io::{SampleData, SampleReadBudget, SampleReadLimits, read_samples_coalesced};
 use crate::decoders::h264::{
    AvcConfig, DecodeError, DecodedImage, FrameToken, H264DecodeBatch, JpegQuality, OutputBudget,
-   ThumbnailSize, decode_native_frame_batches_to_jpeg,
+   ThumbnailSize, decode_native_frame_batches_to_jpeg, decode_native_frame_batches_to_jpeg_each,
 };
 use crate::errors::{MediaParserError, Result};
 use crate::stream::StreamReader;
 use crate::types::{Frame, PixelFormat};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, atomic::AtomicBool};
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -67,7 +67,7 @@ pub struct ThumbnailOptions {
    pub max_output_bytes: Option<usize>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct VideoTrack {
    id: u32,
    timescale: u32,
@@ -193,6 +193,47 @@ impl ThumbnailIndex {
       timestamps: &[Duration],
       options: ThumbnailOptions,
    ) -> Result<Vec<Frame>> {
+      let (targets, plans) = self.exact_plans(timestamps)?;
+      self
+         .execute_job_plans(reader, targets, plans, options, "too many thumbnail GOPs")
+         .await
+   }
+
+   /// Like [`Self::frames`], but hands each decoded frame to `on_frame` as
+   /// soon as it is ready, with the positions in `timestamps` it answers.
+   ///
+   /// Frames arrive in GOP order and, within a GOP, in presentation order. If
+   /// `on_frame` fails, decoding stops and that error is returned; frames
+   /// already handed over stay valid.
+   ///
+   /// Setting `stop` cancels the extraction with [`MediaParserError::Cancelled`]:
+   /// no sample is submitted, no decoder is opened or drained, and no frame is
+   /// handed over after the decode worker sees it. A native call already in
+   /// progress still finishes, so there is no bound on how soon that happens.
+   /// Dropping the returned future does not stop the worker; only `stop` does.
+   pub async fn frames_each(
+      &self,
+      reader: &dyn StreamReader,
+      timestamps: &[Duration],
+      options: ThumbnailOptions,
+      stop: Arc<AtomicBool>,
+      on_frame: impl FnMut(&[usize], Frame) -> Result<()> + Send + 'static,
+   ) -> Result<()> {
+      let (targets, plans) = self.exact_plans(timestamps)?;
+      self
+         .execute_job_plans_each(
+            reader,
+            targets,
+            plans,
+            options,
+            "too many thumbnail GOPs",
+            stop,
+            on_frame,
+         )
+         .await
+   }
+
+   fn exact_plans(&self, timestamps: &[Duration]) -> Result<(Vec<ExactTarget>, Vec<JobPlan>)> {
       self.validate_timestamps(timestamps)?;
       let mut targets = timestamps
          .iter()
@@ -217,10 +258,7 @@ impl ThumbnailIndex {
             &mut targets,
          )?);
       }
-
-      self
-         .execute_job_plans(reader, targets, plans, options, "too many thumbnail GOPs")
-         .await
+      Ok((targets, plans))
    }
 
    async fn execute_job_plans(
@@ -231,13 +269,7 @@ impl ThumbnailIndex {
       options: ThumbnailOptions,
       reserve_error: &'static str,
    ) -> Result<Vec<Frame>> {
-      let permit = Arc::new(
-         Arc::clone(&EXTRACTION_PERMITS)
-            .acquire_owned()
-            .await
-            .expect("the thumbnail-extraction semaphore is never closed"),
-      );
-      let jobs = load_decode_jobs(reader, plans, &self.tables, reserve_error).await?;
+      let (permit, jobs) = load_decode_jobs(reader, plans, &self.tables, reserve_error).await?;
       let images = run_decode_jobs(
          Arc::clone(&permit),
          jobs,
@@ -249,6 +281,57 @@ impl ThumbnailIndex {
       assemble_frames(&self.track, targets, images)
    }
 
+   #[allow(clippy::too_many_arguments)] // The stop flag and consumer travel with the plans.
+   async fn execute_job_plans_each(
+      &self,
+      reader: &dyn StreamReader,
+      targets: Vec<ExactTarget>,
+      plans: Vec<JobPlan>,
+      options: ThumbnailOptions,
+      reserve_error: &'static str,
+      stop: Arc<AtomicBool>,
+      mut on_frame: impl FnMut(&[usize], Frame) -> Result<()> + Send + 'static,
+   ) -> Result<()> {
+      let (permit, jobs) = load_decode_jobs(reader, plans, &self.tables, reserve_error).await?;
+      let mut answers = HashMap::<(Gop, FrameToken), (u64, Vec<usize>)>::new();
+      for (index, target) in targets.iter().enumerate() {
+         answers
+            .entry((target.gop, target.token))
+            .or_insert_with(|| (target.presentation_tick, Vec::new()))
+            .1
+            .push(index);
+      }
+      let track = self.track;
+      spawn_decode_task(Arc::clone(&permit), move || {
+         let output_budget = OutputBudget::new(options.max_output_bytes);
+         let batches = decode_batches(&jobs);
+         // The pipeline only carries `DecodeError`; keep the caller's own error.
+         let mut consumer_error = None;
+         let decoded = decode_native_frame_batches_to_jpeg_each(
+            &batches,
+            options.quality,
+            options.size,
+            &output_budget,
+            &stop,
+            |batch, token, image| {
+               let (tick, indices) =
+                  answers.remove(&(jobs[batch].gop, token)).ok_or_else(|| {
+                     DecodeError::BackendContract("decoded an unrequested thumbnail".to_string())
+                  })?;
+               on_frame(&indices, frame_from_image(&track, tick, image)).map_err(|error| {
+                  consumer_error = Some(error);
+                  DecodeError::OutputLimit("thumbnail consumer stopped".to_string())
+               })
+            },
+         );
+         match consumer_error {
+            Some(error) => Err(error),
+            None => decoded.map_err(map_decode_error),
+         }
+      })
+      .await
+   }
+
    /// Extracts the nearest preceding keyframe for each timestamp.
    pub async fn keyframes(
       &self,
@@ -256,6 +339,43 @@ impl ThumbnailIndex {
       timestamps: &[Duration],
       options: ThumbnailOptions,
    ) -> Result<Vec<Frame>> {
+      let (targets, plans) = self.keyframe_plans(timestamps)?;
+      self
+         .execute_job_plans(
+            reader,
+            targets,
+            plans,
+            options,
+            "too many thumbnail keyframes",
+         )
+         .await
+   }
+
+   /// Like [`Self::keyframes`], streaming each keyframe as in
+   /// [`Self::frames_each`], including how `stop` cancels it.
+   pub async fn keyframes_each(
+      &self,
+      reader: &dyn StreamReader,
+      timestamps: &[Duration],
+      options: ThumbnailOptions,
+      stop: Arc<AtomicBool>,
+      on_frame: impl FnMut(&[usize], Frame) -> Result<()> + Send + 'static,
+   ) -> Result<()> {
+      let (targets, plans) = self.keyframe_plans(timestamps)?;
+      self
+         .execute_job_plans_each(
+            reader,
+            targets,
+            plans,
+            options,
+            "too many thumbnail keyframes",
+            stop,
+            on_frame,
+         )
+         .await
+   }
+
+   fn keyframe_plans(&self, timestamps: &[Duration]) -> Result<(Vec<ExactTarget>, Vec<JobPlan>)> {
       self.validate_timestamps(timestamps)?;
       let targets = timestamps
          .iter()
@@ -289,16 +409,7 @@ impl ThumbnailIndex {
             wanted: vec![(FrameToken::new(0), output_count_by_sample[&sample_index])],
          });
       }
-
-      self
-         .execute_job_plans(
-            reader,
-            targets,
-            plans,
-            options,
-            "too many thumbnail keyframes",
-         )
-         .await
+      Ok((targets, plans))
    }
 
    fn validate_timestamps(&self, timestamps: &[Duration]) -> Result<()> {
@@ -321,12 +432,19 @@ impl ThumbnailIndex {
    }
 }
 
+/// Returns the permit with the jobs so callers retain admission through decode and assembly.
 async fn load_decode_jobs(
    reader: &dyn StreamReader,
    plans: Vec<JobPlan>,
    tables: &VideoSampleTables,
    reserve_error: &'static str,
-) -> Result<Vec<DecodeJob>> {
+) -> Result<(Arc<OwnedSemaphorePermit>, Vec<DecodeJob>)> {
+   let permit = Arc::new(
+      Arc::clone(&EXTRACTION_PERMITS)
+         .acquire_owned()
+         .await
+         .expect("the thumbnail-extraction semaphore is never closed"),
+   );
    let wanted_samples = samples_for_gops(plans.iter().map(|plan| plan.gop))?;
    let mut sample_read_budget = SampleReadBudget::default();
    let mut samples = read_samples_coalesced(
@@ -366,7 +484,7 @@ async fn load_decode_jobs(
          wanted: plan.wanted,
       });
    }
-   Ok(jobs)
+   Ok((permit, jobs))
 }
 
 /// Native backends keep one compatible decoder alive across
@@ -381,15 +499,7 @@ async fn run_decode_jobs(
 ) -> Result<HashMap<(Gop, FrameToken), DecodedImage>> {
    let decoded = spawn_decode_task(permit, move || {
       let output_budget = OutputBudget::new(max_output_bytes);
-      let batches = jobs
-         .iter()
-         .map(|job| H264DecodeBatch {
-            config: &job.avc_config,
-            samples: &job.samples,
-            tokens: &job.tokens,
-            wanted: &job.wanted,
-         })
-         .collect::<Vec<_>>();
+      let batches = decode_batches(&jobs);
       let outputs = decode_native_frame_batches_to_jpeg(&batches, quality, size, &output_budget)
          .map_err(map_decode_error)?;
       drop(batches);
@@ -404,6 +514,18 @@ async fn run_decode_jobs(
    .await?;
 
    Ok(collect_decoded_images(decoded))
+}
+
+fn decode_batches(jobs: &[DecodeJob]) -> Vec<H264DecodeBatch<'_, SampleData>> {
+   jobs
+      .iter()
+      .map(|job| H264DecodeBatch {
+         config: &job.avc_config,
+         samples: &job.samples,
+         tokens: &job.tokens,
+         wanted: &job.wanted,
+      })
+      .collect()
 }
 
 /// The worker owns a permit as well as its caller: dropping the async future
@@ -443,6 +565,7 @@ fn map_decode_error(error: DecodeError) -> MediaParserError {
       | DecodeError::Convert(message) => MediaParserError::Decode(message),
       DecodeError::OutputLimit(message) => MediaParserError::OutputLimit(message),
       DecodeError::ResourceLimit(message) => MediaParserError::ResourceLimit(message),
+      DecodeError::Cancelled => MediaParserError::Cancelled,
    }
 }
 
@@ -975,6 +1098,20 @@ mod tests {
       let times = [Duration::ZERO];
       let mut exact = Box::pin(index.frames(&reader, &times, ThumbnailOptions::default()));
       let mut keyframes = Box::pin(index.keyframes(&reader, &times, ThumbnailOptions::default()));
+      let mut exact_each = Box::pin(index.frames_each(
+         &reader,
+         &times,
+         ThumbnailOptions::default(),
+         Arc::new(AtomicBool::new(false)),
+         |_, _| panic!("a failing reader must not deliver frames"),
+      ));
+      let mut keyframes_each = Box::pin(index.keyframes_each(
+         &reader,
+         &times,
+         ThumbnailOptions::default(),
+         Arc::new(AtomicBool::new(false)),
+         |_, _| panic!("a failing reader must not deliver frames"),
+      ));
       assert!(
          tokio::time::timeout(Duration::from_millis(25), &mut exact)
             .await
@@ -986,9 +1123,22 @@ mod tests {
             .is_err()
       );
       assert_eq!(reader.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+      assert!(
+         tokio::time::timeout(Duration::from_millis(25), &mut exact_each)
+            .await
+            .is_err()
+      );
+      assert!(
+         tokio::time::timeout(Duration::from_millis(25), &mut keyframes_each)
+            .await
+            .is_err()
+      );
+      assert_eq!(reader.0.load(std::sync::atomic::Ordering::SeqCst), 0);
       drop(exact); // Cancellation while queued must not consume a permit later.
+      drop(exact_each);
       drop(held);
       assert!(keyframes.await.is_err());
+      assert!(keyframes_each.await.is_err());
       assert!(reader.0.load(std::sync::atomic::Ordering::SeqCst) > 0);
       let returned = tokio::time::timeout(
          Duration::from_secs(5),

@@ -114,6 +114,25 @@ export interface ThumbnailsOptions extends MetadataOptions {
    maxHeight?: number;
 }
 
+/** One thumbnail delivered by {@link streamThumbnails}. */
+export type StreamedThumbnailInfo = ThumbnailInfo & {
+   /** Positions in `timestamps` that this thumbnail answers, ascending. */
+   indices: number[];
+};
+
+/** Options for {@link streamThumbnails}. */
+export interface StreamThumbnailsOptions extends ThumbnailsOptions {
+   /**
+    * Called synchronously once per decoded thumbnail, in file order. Use
+    * `indices` to place each one; a thrown error rejects the stream. The
+    * return type is `undefined` so that an `async` callback does not compile:
+    * its returned promise would be discarded. It also rejects an
+    * expression-bodied arrow that returns a value: `(t) => list.push(t)`
+    * fails with TS2322, so use a block body, `(t) => { list.push(t); }`.
+    */
+   onThumbnail(thumbnail: StreamedThumbnailInfo): undefined;
+}
+
 /** One timed subtitle cue decoded from the binary IPC response. */
 export interface SubtitleCueInfo {
    cueId: number;
