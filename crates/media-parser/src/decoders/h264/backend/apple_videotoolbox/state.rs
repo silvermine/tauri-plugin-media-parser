@@ -236,45 +236,54 @@ mod tests {
    use super::*;
    use crate::decoders::h264::frame::PlanarYuv;
    use crate::decoders::h264::{DecodeError, FrameToken};
+   use rstest::rstest;
 
    fn owned(value: u8) -> OwnedNv12 {
       OwnedNv12::from_compact_for_test(2, 2, vec![value; 4], vec![value; 2])
    }
 
-   #[test]
-   fn ticket_preserves_every_token_without_using_timing() {
-      for value in [0, 7, u64::MAX] {
-         let ticket = CallbackTicket::new(FrameToken::new(value));
-         assert_eq!(ticket.token(), FrameToken::new(value));
-         assert_eq!(ticket.completion_count(), 0);
-         assert_eq!(ticket.increment_completion(), 1);
-         assert_eq!(ticket.increment_completion(), 2);
-      }
+   #[rstest]
+   #[case::zero(0)]
+   #[case::typical(7)]
+   #[case::u64_max(u64::MAX)]
+   fn ticket_preserves_every_token_without_using_timing(#[case] value: u64) {
+      let ticket = CallbackTicket::new(FrameToken::new(value));
+      assert_eq!(ticket.token(), FrameToken::new(value));
+      assert_eq!(ticket.completion_count(), 0);
+      assert_eq!(ticket.increment_completion(), 1);
+      assert_eq!(ticket.increment_completion(), 2);
    }
 
-   #[test]
-   fn validates_missing_duplicate_and_impossible_native_error_completions() {
-      let completed = CallbackTicket::new(FrameToken::new(0));
-      completed.increment_completion();
-      assert_eq!(validate_completion(&completed, 0), Ok(()));
+   #[rstest]
+   #[case::completed_once(1, 0)]
+   #[case::native_error_without_callback(0, -12902)]
+   fn accepts_one_success_callback_or_a_callbackless_native_error(
+      #[case] completions: usize,
+      #[case] native_status: i32,
+   ) {
+      let ticket = CallbackTicket::new(FrameToken::new(0));
+      for _ in 0..completions {
+         ticket.increment_completion();
+      }
+      assert_eq!(validate_completion(&ticket, native_status), Ok(()));
+   }
 
-      let missing = CallbackTicket::new(FrameToken::new(1));
+   #[rstest]
+   #[case::missing(0, 0, "missing")]
+   #[case::duplicate(2, 0, "2 callbacks")]
+   #[case::impossible_native_error(2, -12902, "native failure")]
+   fn validates_missing_duplicate_and_impossible_native_error_completions(
+      #[case] completions: usize,
+      #[case] native_status: i32,
+      #[case] expected: &str,
+   ) {
+      let ticket = CallbackTicket::new(FrameToken::new(1));
+      for _ in 0..completions {
+         ticket.increment_completion();
+      }
       assert!(matches!(
-         validate_completion(&missing, 0),
-         Err(DecodeError::BackendContract(message)) if message.contains("missing")
-      ));
-      assert_eq!(validate_completion(&missing, -12902), Ok(()));
-
-      let duplicate = CallbackTicket::new(FrameToken::new(2));
-      duplicate.increment_completion();
-      duplicate.increment_completion();
-      assert!(matches!(
-         validate_completion(&duplicate, 0),
-         Err(DecodeError::BackendContract(message)) if message.contains("2 callbacks")
-      ));
-      assert!(matches!(
-         validate_completion(&duplicate, -12902),
-         Err(DecodeError::BackendContract(message)) if message.contains("native failure")
+         validate_completion(&ticket, native_status),
+         Err(DecodeError::BackendContract(message)) if message.contains(expected)
       ));
    }
 

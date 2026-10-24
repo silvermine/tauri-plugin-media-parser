@@ -33,6 +33,7 @@ pub fn parse_cover_art(moov_payload: &[u8]) -> Option<CoverArt> {
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
 
    fn mp4_box(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
       let mut result = Vec::with_capacity(8 + payload.len());
@@ -65,9 +66,10 @@ mod tests {
       assert_eq!(cover.data, png);
    }
 
-   #[test]
-   fn rejects_missing_or_truncated_cover_structure() {
-      assert_eq!(parse_cover_art(&[]), None);
-      assert_eq!(parse_cover_art(&cover_payload(&[0; 7])), None);
+   #[rstest]
+   #[case::missing_structure(Vec::new())]
+   #[case::truncated_data_box(cover_payload(&[0; 7]))]
+   fn rejects_missing_or_truncated_cover_structure(#[case] moov_payload: Vec<u8>) {
+      assert_eq!(parse_cover_art(&moov_payload), None);
    }
 }

@@ -191,6 +191,7 @@ fn find_moov_pattern(buf: &[u8], base_offset: u64, file_size: u64) -> Option<(u6
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
    use std::sync::{
       Mutex,
       atomic::{AtomicBool, Ordering},
@@ -329,46 +330,42 @@ mod tests {
       );
    }
 
-   #[test]
-   fn test_find_moov_aligned_at_start() {
-      let buf = make_box(b"moov", 16);
-      let result = find_moov_aligned(&buf, 0);
-      assert_eq!(result, Some((0, 24)));
-   }
-
-   #[test]
-   fn test_find_moov_aligned_after_ftyp() {
-      let mut buf = make_box(b"ftyp", 8);
-      buf.extend(make_box(b"moov", 16));
-      let result = find_moov_aligned(&buf, 0);
-      assert_eq!(result, Some((16, 24)));
-   }
-
-   #[test]
-   fn test_find_moov_aligned_rejects_overflowing_box_offset() {
+   /// A `free` box followed by a `skip` box whose extended size overflows the next offset.
+   fn overflowing_box_offset_buf() -> Vec<u8> {
       let mut buf = make_box(b"free", 0);
       buf.extend_from_slice(&1u32.to_be_bytes());
       buf.extend_from_slice(b"skip");
       buf.extend_from_slice(&u64::MAX.to_be_bytes());
-
-      assert_eq!(find_moov_aligned(&buf, 0), None);
+      buf
    }
 
-   #[test]
-   fn test_find_moov_pattern_unaligned() {
+   #[rstest]
+   #[case::at_start(make_box(b"moov", 16), Some((0, 24)))]
+   #[case::after_ftyp([make_box(b"ftyp", 8), make_box(b"moov", 16)].concat(), Some((16, 24)))]
+   #[case::overflowing_box_offset(overflowing_box_offset_buf(), None)]
+   #[case::moov_not_found(make_box(b"ftyp", 8), None)]
+   fn test_find_moov_aligned(#[case] buf: Vec<u8>, #[case] expected: Option<(u64, u64)>) {
+      let result = find_moov_aligned(&buf, 0);
+      assert_eq!(result, expected);
+   }
+
+   #[rstest]
+   #[case::standard_moov(make_moov_with_mvhd())]
+   #[case::extended_moov(make_extended_moov_with_mvhd())]
+   fn test_find_moov_pattern_unaligned(#[case] moov: Vec<u8>) {
       // Simulate tail buffer that starts mid-file
       let mut buf = vec![0u8; 100]; // garbage prefix
-      let moov = make_moov_with_mvhd();
       let moov_size = moov.len();
       buf.extend(moov);
       let file_size = 10000u64;
       let base_offset = file_size - buf.len() as u64;
 
       let result = find_moov_pattern(&buf, base_offset, file_size);
-      assert!(result.is_some());
-      let (pos, size) = result.unwrap();
-      assert_eq!(size as usize, moov_size);
-      assert_eq!(pos, base_offset + 100);
+
+      assert_eq!(
+         result,
+         Some((base_offset + 100, u64::try_from(moov_size).unwrap()))
+      );
    }
 
    #[test]
@@ -382,23 +379,6 @@ mod tests {
       assert_eq!(
          find_moov_pattern(&buf, base_offset, file_size),
          Some((base_offset, u64::try_from(moov_size).unwrap()))
-      );
-   }
-
-   #[test]
-   fn test_find_extended_moov_pattern_unaligned() {
-      let mut buf = vec![0u8; 100];
-      let moov = make_extended_moov_with_mvhd();
-      let moov_size = moov.len();
-      buf.extend(moov);
-      let file_size = 10_000u64;
-      let base_offset = file_size - buf.len() as u64;
-
-      let result = find_moov_pattern(&buf, base_offset, file_size);
-
-      assert_eq!(
-         result,
-         Some((base_offset + 100, u64::try_from(moov_size).unwrap()))
       );
    }
 
@@ -456,12 +436,5 @@ mod tests {
       buf.extend_from_slice(b"mvhd");
 
       assert_eq!(find_moov_pattern(&buf, u64::MAX - 1, u64::MAX), None);
-   }
-
-   #[test]
-   fn test_moov_not_found() {
-      let buf = make_box(b"ftyp", 8);
-      let result = find_moov_aligned(&buf, 0);
-      assert_eq!(result, None);
    }
 }

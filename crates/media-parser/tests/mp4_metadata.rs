@@ -4,6 +4,7 @@ mod common;
 
 use common::fixtures_dir;
 use media_parser::{FileStreamReader, MediaParser, PixelFormat};
+use rstest::rstest;
 use std::io::Write;
 
 fn mp4_box(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
@@ -15,16 +16,14 @@ fn mp4_box(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
    data
 }
 
+#[rstest]
+#[case::multitrack_mp4("multitrack_video.mp4", 10.0)]
+#[case::quicktime_mov("sample_metadata.mov", 25.0)]
 #[tokio::test]
-async fn metadata_frame_rate_matches_video_fixtures() {
-   for (name, fps) in [
-      ("multitrack_video.mp4", 10.0),
-      ("sample_metadata.mov", 25.0),
-   ] {
-      let reader = FileStreamReader::new(fixtures_dir().join(name)).unwrap();
-      let metadata = MediaParser::new(reader).metadata().await.unwrap();
-      assert_eq!(metadata.frame_rate, Some(fps), "{name}");
-   }
+async fn metadata_frame_rate_matches_video_fixtures(#[case] name: &str, #[case] fps: f64) {
+   let reader = FileStreamReader::new(fixtures_dir().join(name)).unwrap();
+   let metadata = MediaParser::new(reader).metadata().await.unwrap();
+   assert_eq!(metadata.frame_rate, Some(fps), "{name}");
 }
 
 #[tokio::test]

@@ -318,6 +318,14 @@ pub(crate) fn validate_planar<'a>(
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
+
+   const VISIBLE_CROP: Crop = Crop {
+      x: 2,
+      y: 4,
+      width: 10,
+      height: 6,
+   };
 
    fn validate_visible<'a>(
       source: &'a PlanarYuv<'a>,
@@ -383,39 +391,43 @@ mod tests {
       assert_eq!(validated.v.data.len(), v.len() - 4);
    }
 
-   #[test]
-   fn validates_nv12_nv21_and_the_exact_last_byte() {
+   #[rstest]
+   #[case::nv12(0, 1)]
+   #[case::nv21(1, 0)]
+   fn validates_nv12_nv21_and_the_exact_last_byte(
+      #[case] u_offset: usize,
+      #[case] v_offset: usize,
+   ) {
       let y = [0; 8];
       let uv = [0; 4];
-      for (u, v) in [(&uv[..], &uv[1..]), (&uv[1..], &uv[..])] {
-         let source = PlanarYuv {
-            y: Plane {
-               data: &y,
-               row_stride: 4,
-               pixel_stride: 1,
-            },
-            u: Plane {
-               data: u,
-               row_stride: 4,
-               pixel_stride: 2,
-            },
-            v: Plane {
-               data: v,
-               row_stride: 4,
-               pixel_stride: 2,
-            },
-            coded_width: 4,
-            coded_height: 2,
-            crop: Crop {
-               x: 0,
-               y: 0,
-               width: 4,
-               height: 2,
-            },
-         };
+      let (u, v) = (&uv[u_offset..], &uv[v_offset..]);
+      let source = PlanarYuv {
+         y: Plane {
+            data: &y,
+            row_stride: 4,
+            pixel_stride: 1,
+         },
+         u: Plane {
+            data: u,
+            row_stride: 4,
+            pixel_stride: 2,
+         },
+         v: Plane {
+            data: v,
+            row_stride: 4,
+            pixel_stride: 2,
+         },
+         coded_width: 4,
+         coded_height: 2,
+         crop: Crop {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 2,
+         },
+      };
 
-         validate_visible(&source, &[0; 24]).expect("interleaved chroma reaches exact last byte");
-      }
+      validate_visible(&source, &[0; 24]).expect("interleaved chroma reaches exact last byte");
    }
 
    #[test]
@@ -464,49 +476,71 @@ mod tests {
       ));
    }
 
-   #[test]
-   fn rejects_odd_crop_coordinates_as_unsupported() {
+   #[rstest]
+   #[case::odd_x(1, 0)]
+   #[case::odd_y(0, 1)]
+   fn rejects_odd_crop_coordinates_as_unsupported(#[case] x: usize, #[case] y_offset: usize) {
       let y = [0; 16];
       let u = [0; 4];
       let v = [0; 4];
-      for (x, y_offset) in [(1, 0), (0, 1)] {
-         let mut source = i420(&y, &u, &v, 4, 4);
-         source.crop = Crop {
-            x,
-            y: y_offset,
-            width: 2,
-            height: 2,
-         };
+      let mut source = i420(&y, &u, &v, 4, 4);
+      source.crop = Crop {
+         x,
+         y: y_offset,
+         width: 2,
+         height: 2,
+      };
 
-         assert!(matches!(
-            validate_visible(&source, &[0; 12]),
-            Err(DecodeError::UnsupportedFormat(_))
-         ));
-      }
+      assert!(matches!(
+         validate_visible(&source, &[0; 12]),
+         Err(DecodeError::UnsupportedFormat(_))
+      ));
    }
 
    #[test]
-   fn rejects_zero_strides_non_unit_luma_and_out_of_bounds_crop() {
+   fn rejects_a_zero_u_pixel_stride() {
       let y = [0; 16];
       let u = [0; 4];
       let v = [0; 4];
       let mut source = i420(&y, &u, &v, 4, 4);
       source.u.pixel_stride = 0;
-      assert!(validate_visible(&source, &[0; 48]).is_err());
 
-      source = i420(&y, &u, &v, 4, 4);
+      assert!(validate_visible(&source, &[0; 48]).is_err());
+   }
+
+   #[test]
+   fn rejects_a_zero_v_row_stride() {
+      let y = [0; 16];
+      let u = [0; 4];
+      let v = [0; 4];
+      let mut source = i420(&y, &u, &v, 4, 4);
       source.v.row_stride = 0;
-      assert!(validate_visible(&source, &[0; 48]).is_err());
 
-      source = i420(&y, &u, &v, 4, 4);
+      assert!(validate_visible(&source, &[0; 48]).is_err());
+   }
+
+   #[test]
+   fn rejects_non_unit_luma_pixel_stride_as_unsupported() {
+      let y = [0; 16];
+      let u = [0; 4];
+      let v = [0; 4];
+      let mut source = i420(&y, &u, &v, 4, 4);
       source.y.pixel_stride = 2;
+
       assert!(matches!(
          validate_visible(&source, &[0; 48]),
          Err(DecodeError::UnsupportedFormat(_))
       ));
+   }
 
-      source = i420(&y, &u, &v, 4, 4);
+   #[test]
+   fn rejects_an_out_of_bounds_crop() {
+      let y = [0; 16];
+      let u = [0; 4];
+      let v = [0; 4];
+      let mut source = i420(&y, &u, &v, 4, 4);
       source.crop.width = 5;
+
       assert!(validate_visible(&source, &[0; 60]).is_err());
    }
 
@@ -521,13 +555,17 @@ mod tests {
    }
 
    #[test]
-   fn rejects_target_length_and_checked_arithmetic_overflow() {
+   fn rejects_a_target_one_byte_short() {
       let y = [0; 4];
       let u = [0; 1];
       let v = [0; 1];
       let source = i420(&y, &u, &v, 2, 2);
-      assert!(validate_visible(&source, &[0; 11]).is_err());
 
+      assert!(validate_visible(&source, &[0; 11]).is_err());
+   }
+
+   #[test]
+   fn rejects_checked_arithmetic_overflow() {
       let overflowing = PlanarYuv {
          y: Plane {
             data: &[],
@@ -553,86 +591,70 @@ mod tests {
             height: 2,
          },
       };
+
       assert!(validate_visible(&overflowing, &[0; 12]).is_err());
    }
 
-   #[test]
-   fn shared_420_geometry_accepts_a_visible_crop_and_rejects_invalid_geometry() {
-      let crop = Crop {
-         x: 2,
-         y: 4,
+   #[rstest]
+   #[case::visible_crop(16, VISIBLE_CROP, Ok(()))]
+   #[case::odd_coded_width(15, VISIBLE_CROP, Err(Geometry420Error::InvalidCodedDimensions))]
+   #[case::odd_crop_x(16, Crop { x: 3, ..VISIBLE_CROP }, Err(Geometry420Error::ChromaMisalignedCrop))]
+   #[case::crop_past_coded_width(
+      16,
+      Crop {
+         x: 8,
          width: 10,
-         height: 6,
-      };
-      assert_eq!(validate_420_crop(16, 12, crop), Ok(()));
+         ..VISIBLE_CROP
+      },
+      Err(Geometry420Error::CropOutsideCodedGeometry)
+   )]
+   #[case::empty_crop(16, Crop { width: 0, ..VISIBLE_CROP }, Err(Geometry420Error::EmptyCrop))]
+   fn shared_420_geometry_validates_the_crop(
+      #[case] coded_width: usize,
+      #[case] crop: Crop,
+      #[case] expected: Result<(), Geometry420Error>,
+   ) {
+      assert_eq!(validate_420_crop(coded_width, 12, crop), expected);
+   }
 
-      assert_eq!(
-         validate_420_crop(15, 12, crop),
-         Err(Geometry420Error::InvalidCodedDimensions)
-      );
-      assert_eq!(
-         validate_420_crop(16, 12, Crop { x: 3, ..crop }),
-         Err(Geometry420Error::ChromaMisalignedCrop)
-      );
-      assert_eq!(
-         validate_420_crop(
-            16,
-            12,
-            Crop {
-               x: 8,
-               width: 10,
-               ..crop
-            }
-         ),
-         Err(Geometry420Error::CropOutsideCodedGeometry)
-      );
-      assert_eq!(
-         validate_420_crop(16, 12, Crop { width: 0, ..crop }),
-         Err(Geometry420Error::EmptyCrop)
-      );
+   #[rstest]
+   #[case::even_dimensions(
+      16,
+      12,
+      Ok(CompactNv12Lengths {
+         y_bytes: 192,
+         uv_bytes: 96,
+      })
+   )]
+   #[case::odd_width(
+      15,
+      12,
+      Err(CompactNv12Error::Geometry(Geometry420Error::InvalidCodedDimensions))
+   )]
+   #[case::near_usize_max(usize::MAX - 1, usize::MAX - 1, Err(CompactNv12Error::ResourceLimit))]
+   #[case::native_8k_surface(
+      7680,
+      4320,
+      Ok(CompactNv12Lengths {
+         y_bytes: 33_177_600,
+         uv_bytes: 16_588_800,
+      })
+   )]
+   #[case::width_over_native_limit(16_386, 2, Err(CompactNv12Error::ResourceLimit))]
+   #[case::bytes_over_native_limit(16_384, 2_732, Err(CompactNv12Error::ResourceLimit))]
+   fn compact_nv12_lengths_are_checked(
+      #[case] coded_width: usize,
+      #[case] coded_height: usize,
+      #[case] expected: Result<CompactNv12Lengths, CompactNv12Error>,
+   ) {
+      assert_eq!(compact_nv12_lengths(coded_width, coded_height), expected);
    }
 
    #[test]
-   fn compact_nv12_lengths_are_checked() {
-      assert_eq!(
-         compact_nv12_lengths(16, 12),
-         Ok(CompactNv12Lengths {
-            y_bytes: 192,
-            uv_bytes: 96,
-         })
-      );
-      assert_eq!(
-         compact_nv12_lengths(15, 12),
-         Err(CompactNv12Error::Geometry(
-            Geometry420Error::InvalidCodedDimensions
-         ))
-      );
-      assert_eq!(
-         compact_nv12_lengths(usize::MAX - 1, usize::MAX - 1),
-         Err(CompactNv12Error::ResourceLimit)
-      );
+   fn checked_compact_nv12_lengths_reports_size_overflow() {
       assert_eq!(
          checked_compact_nv12_lengths(usize::MAX - 1, usize::MAX - 1),
          Err(CompactNv12Error::SizeOverflow)
-      );
-   }
-
-   #[test]
-   fn compact_nv12_lengths_enforce_native_surface_limits() {
-      assert_eq!(
-         compact_nv12_lengths(7680, 4320),
-         Ok(CompactNv12Lengths {
-            y_bytes: 33_177_600,
-            uv_bytes: 16_588_800,
-         })
-      );
-      assert_eq!(
-         compact_nv12_lengths(16_386, 2),
-         Err(CompactNv12Error::ResourceLimit)
-      );
-      assert_eq!(
-         compact_nv12_lengths(16_384, 2_732),
-         Err(CompactNv12Error::ResourceLimit)
       );
    }
 }

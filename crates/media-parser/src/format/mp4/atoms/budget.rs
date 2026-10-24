@@ -137,6 +137,7 @@ pub(in crate::format::mp4) fn budgeted_vec<T>(
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
 
    #[test]
    fn track_ceiling_precedes_global_and_refused_reservations_are_not_charged() {
@@ -218,13 +219,22 @@ mod tests {
       budget.end_track();
    }
 
-   #[test]
-   fn checked_add_overflow_is_budget_exceeded_without_changing_usage() {
-      let mut budget = RetainedBudget::new(usize::MAX);
-      budget.charge_bytes(usize::MAX).unwrap();
+   #[rstest]
+   #[case::checked_add_overflow(usize::MAX, usize::MAX, 1)]
+   #[case::charge_over_limit(10, 6, 5)]
+   fn rejected_charge_is_budget_exceeded_without_changing_usage(
+      #[case] max_bytes: usize,
+      #[case] charged: usize,
+      #[case] rejected: usize,
+   ) {
+      let mut budget = RetainedBudget::new(max_bytes);
+      budget.charge_bytes(charged).unwrap();
 
-      assert_eq!(budget.charge_bytes(1), Err(TableParseError::BudgetExceeded));
-      assert_eq!(budget.used_bytes(), usize::MAX);
+      assert_eq!(
+         budget.charge_bytes(rejected),
+         Err(TableParseError::BudgetExceeded)
+      );
+      assert_eq!(budget.used_bytes(), charged);
    }
 
    #[test]
@@ -237,15 +247,6 @@ mod tests {
          Err(TableParseError::BudgetExceeded)
       );
       assert_eq!(budget.used_bytes(), 0);
-   }
-
-   #[test]
-   fn rejected_limit_charge_does_not_change_usage() {
-      let mut budget = RetainedBudget::new(10);
-      budget.charge_bytes(6).unwrap();
-
-      assert_eq!(budget.charge_bytes(5), Err(TableParseError::BudgetExceeded));
-      assert_eq!(budget.used_bytes(), 6);
    }
 
    #[test]

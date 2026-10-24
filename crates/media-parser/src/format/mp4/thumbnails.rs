@@ -947,6 +947,7 @@ fn parse_avc_descriptions(stsd: &[u8]) -> Result<Option<Vec<Option<Arc<AvcConfig
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
 
    struct FailingSampleReader(std::sync::atomic::AtomicUsize);
 
@@ -1107,30 +1108,19 @@ mod tests {
       target.extend_from_slice(payload);
    }
 
-   #[test]
-   fn maps_each_decode_error_without_collapsing_the_taxonomy() {
-      let cases = [
-         (DecodeError::Bitstream("x".into()), "Invalid MP4 format: x"),
-         (
-            DecodeError::UnsupportedFormat("x".into()),
-            "Unsupported codec: x",
-         ),
-         (DecodeError::Backend("x".into()), "Decoder error: x"),
-         (DecodeError::BackendContract("x".into()), "Decoder error: x"),
-         (DecodeError::Convert("x".into()), "Decoder error: x"),
-         (
-            DecodeError::OutputLimit("x".into()),
-            "Output limit exceeded: x",
-         ),
-         (
-            DecodeError::ResourceLimit("x".into()),
-            "Resource limit reached: x",
-         ),
-      ];
-
-      for (decode, expected) in cases {
-         assert_eq!(map_decode_error(decode).to_string(), expected);
-      }
+   #[rstest]
+   #[case::bitstream(DecodeError::Bitstream("x".into()), "Invalid MP4 format: x")]
+   #[case::unsupported_format(DecodeError::UnsupportedFormat("x".into()), "Unsupported codec: x")]
+   #[case::backend(DecodeError::Backend("x".into()), "Decoder error: x")]
+   #[case::backend_contract(DecodeError::BackendContract("x".into()), "Decoder error: x")]
+   #[case::convert(DecodeError::Convert("x".into()), "Decoder error: x")]
+   #[case::output_limit(DecodeError::OutputLimit("x".into()), "Output limit exceeded: x")]
+   #[case::resource_limit(DecodeError::ResourceLimit("x".into()), "Resource limit reached: x")]
+   fn maps_each_decode_error_without_collapsing_the_taxonomy(
+      #[case] decode: DecodeError,
+      #[case] expected: &str,
+   ) {
+      assert_eq!(map_decode_error(decode).to_string(), expected);
    }
 
    #[test]

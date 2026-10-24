@@ -522,6 +522,7 @@ fn checked_region_end(offset: u64, size: usize) -> SampleReadResult<u64> {
 mod tests {
    use super::*;
    use async_trait::async_trait;
+   use rstest::rstest;
    use std::sync::Mutex;
    use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -580,23 +581,56 @@ mod tests {
       ));
    }
 
-   #[test]
-   fn max_samples_failure_is_a_limit_error() {
+   #[rstest]
+   #[case::max_samples(
+      1,
+      SampleReadLimits {
+         max_samples: 0,
+         ..TEST_LIMITS
+      },
+      "too many samples",
+   )]
+   #[case::max_logical_bytes(
+      4,
+      SampleReadLimits {
+         max_logical_bytes: 3,
+         ..TEST_LIMITS
+      },
+      "sample batch is too large: 4 bytes",
+   )]
+   #[case::max_physical_bytes(
+      4,
+      SampleReadLimits {
+         max_physical_bytes: 3,
+         ..TEST_LIMITS
+      },
+      "coalesced sample reads are too large",
+   )]
+   #[case::max_regions(
+      4,
+      SampleReadLimits {
+         max_regions: 0,
+         ..TEST_LIMITS
+      },
+      "too many sample read batches",
+   )]
+   fn aggregate_limit_failure_is_a_limit_error(
+      #[case] sample_size: u32,
+      #[case] limits: SampleReadLimits,
+      #[case] expected_reason: &str,
+   ) {
       let mut budget = SampleReadBudget::default();
       let error = plan_read_batches(
          &[1],
-         &fixed_samples(1, 1),
+         &fixed_samples(1, sample_size),
          &one_sample_per_chunk(),
          &[0],
-         SampleReadLimits {
-            max_samples: 0,
-            ..TEST_LIMITS
-         },
+         limits,
          &mut budget,
       )
-      .expect_err("sample count above its configured limit must fail");
+      .expect_err("a request above its configured aggregate limit must fail");
 
-      assert_limit(error, "too many samples");
+      assert_limit(error, expected_reason);
    }
 
    #[test]
@@ -623,44 +657,6 @@ mod tests {
    }
 
    #[test]
-   fn max_logical_bytes_failure_is_a_limit_error() {
-      let mut budget = SampleReadBudget::default();
-      let error = plan_read_batches(
-         &[1],
-         &fixed_samples(1, 4),
-         &one_sample_per_chunk(),
-         &[0],
-         SampleReadLimits {
-            max_logical_bytes: 3,
-            ..TEST_LIMITS
-         },
-         &mut budget,
-      )
-      .expect_err("logical bytes above their configured limit must fail");
-
-      assert_limit(error, "sample batch is too large: 4 bytes");
-   }
-
-   #[test]
-   fn max_physical_bytes_failure_is_a_limit_error() {
-      let mut budget = SampleReadBudget::default();
-      let error = plan_read_batches(
-         &[1],
-         &fixed_samples(1, 4),
-         &one_sample_per_chunk(),
-         &[0],
-         SampleReadLimits {
-            max_physical_bytes: 3,
-            ..TEST_LIMITS
-         },
-         &mut budget,
-      )
-      .expect_err("physical bytes above their configured limit must fail");
-
-      assert_limit(error, "coalesced sample reads are too large");
-   }
-
-   #[test]
    fn max_region_bytes_partitions_contiguous_samples() {
       let mut budget = SampleReadBudget::default();
       let batches = plan(
@@ -680,25 +676,6 @@ mod tests {
          vec![1_024, 1_024]
       );
       assert_eq!(budget.regions, 2);
-   }
-
-   #[test]
-   fn max_regions_failure_is_a_limit_error() {
-      let mut budget = SampleReadBudget::default();
-      let error = plan_read_batches(
-         &[1],
-         &fixed_samples(1, 4),
-         &one_sample_per_chunk(),
-         &[0],
-         SampleReadLimits {
-            max_regions: 0,
-            ..TEST_LIMITS
-         },
-         &mut budget,
-      )
-      .expect_err("region count above its configured limit must fail");
-
-      assert_limit(error, "too many sample read batches");
    }
 
    #[test]
@@ -760,35 +737,6 @@ mod tests {
       );
    }
 
-   #[test]
-   fn rejects_one_over_the_sample_count_limit() {
-      let sizes = fixed_samples(17, 1);
-      let error = plan(
-         &(1..=17).collect::<Vec<_>>(),
-         &sizes,
-         &offsets(17, 1),
-         TEST_LIMITS,
-         &mut SampleReadBudget::default(),
-      )
-      .unwrap_err();
-
-      assert!(error.to_string().contains("too many samples"));
-   }
-
-   #[test]
-   fn rejects_one_over_the_individual_sample_byte_limit() {
-      let error = plan(
-         &[1],
-         &fixed_samples(1, 1_025),
-         &[0],
-         TEST_LIMITS,
-         &mut SampleReadBudget::default(),
-      )
-      .unwrap_err();
-
-      assert!(error.to_string().contains("invalid sample size"));
-   }
-
    /// Four contiguous 1 KiB samples sit exactly on three ceilings at once:
    /// `max_sample_bytes` per sample, and `max_logical_bytes` and
    /// `max_region_bytes` for the coalesced batch. One accepting plan covers
@@ -806,24 +754,6 @@ mod tests {
       .unwrap();
 
       assert_eq!(batches[0].size, 4_096);
-   }
-
-   #[test]
-   fn rejects_one_over_the_aggregate_logical_byte_limit() {
-      let sizes = SampleSizes::variable(vec![1_024, 1_024, 1_024, 1_024, 1]).unwrap();
-      let error = plan(
-         &[1, 2, 3, 4, 5],
-         &sizes,
-         &[0, 1_024, 2_048, 3_072, 4_096],
-         SampleReadLimits {
-            max_region_bytes: 4_097,
-            ..TEST_LIMITS
-         },
-         &mut SampleReadBudget::default(),
-      )
-      .unwrap_err();
-
-      assert!(error.to_string().contains("sample batch is too large"));
    }
 
    #[test]
@@ -845,28 +775,6 @@ mod tests {
    }
 
    #[test]
-   fn rejects_one_over_the_aggregate_physical_byte_limit_including_gaps() {
-      let error = plan(
-         &[1, 2],
-         &fixed_samples(2, 1_024),
-         &[0, 7_169],
-         SampleReadLimits {
-            max_region_bytes: 8_193,
-            max_coalesce_gap_bytes: 6_145,
-            ..TEST_LIMITS
-         },
-         &mut SampleReadBudget::default(),
-      )
-      .unwrap_err();
-
-      assert!(
-         error
-            .to_string()
-            .contains("coalesced sample reads are too large")
-      );
-   }
-
-   #[test]
    fn accepts_the_exact_region_count_limit() {
       let batches = plan(
          &[1, 2, 3, 4],
@@ -880,18 +788,66 @@ mod tests {
       assert_eq!(batches.len(), 4);
    }
 
-   #[test]
-   fn rejects_one_over_the_region_count_limit() {
+   #[rstest]
+   #[case::sample_count_limit(
+      (1..=17).collect(),
+      fixed_samples(17, 1),
+      offsets(17, 1),
+      TEST_LIMITS,
+      "too many samples",
+   )]
+   #[case::individual_sample_byte_limit(
+      vec![1],
+      fixed_samples(1, 1_025),
+      vec![0],
+      TEST_LIMITS,
+      "invalid sample size",
+   )]
+   #[case::aggregate_logical_byte_limit(
+      vec![1, 2, 3, 4, 5],
+      SampleSizes::variable(vec![1_024, 1_024, 1_024, 1_024, 1]).unwrap(),
+      vec![0, 1_024, 2_048, 3_072, 4_096],
+      SampleReadLimits {
+         max_region_bytes: 4_097,
+         ..TEST_LIMITS
+      },
+      "sample batch is too large",
+   )]
+   #[case::aggregate_physical_byte_limit_including_gaps(
+      vec![1, 2],
+      fixed_samples(2, 1_024),
+      vec![0, 7_169],
+      SampleReadLimits {
+         max_region_bytes: 8_193,
+         max_coalesce_gap_bytes: 6_145,
+         ..TEST_LIMITS
+      },
+      "coalesced sample reads are too large",
+   )]
+   #[case::region_count_limit(
+      vec![1, 2, 3, 4, 5],
+      fixed_samples(5, 1),
+      vec![0, 100, 200, 300, 400],
+      TEST_LIMITS,
+      "too many sample read batches",
+   )]
+   fn rejects_one_over_each_limit(
+      #[case] sample_indices: Vec<u32>,
+      #[case] sizes: SampleSizes,
+      #[case] chunk_offsets: Vec<u64>,
+      #[case] limits: SampleReadLimits,
+      #[case] expected: &str,
+   ) {
       let error = plan(
-         &[1, 2, 3, 4, 5],
-         &fixed_samples(5, 1),
-         &[0, 100, 200, 300, 400],
-         TEST_LIMITS,
+         &sample_indices,
+         &sizes,
+         &chunk_offsets,
+         limits,
          &mut SampleReadBudget::default(),
       )
       .unwrap_err();
 
-      assert!(error.to_string().contains("too many sample read batches"));
+      assert!(error.to_string().contains(expected));
    }
 
    #[test]
@@ -974,23 +930,23 @@ mod tests {
       ));
    }
 
-   #[test]
-   fn rejects_sample_indices_that_are_not_strictly_increasing() {
-      for sample_indices in [[1, 1], [2, 1]] {
-         let error = plan(
-            &sample_indices,
-            &fixed_samples(2, 4),
-            &[0, 4],
-            TEST_LIMITS,
-            &mut SampleReadBudget::default(),
-         )
-         .unwrap_err();
+   #[rstest]
+   #[case::repeated_index([1, 1])]
+   #[case::decreasing_index([2, 1])]
+   fn rejects_sample_indices_that_are_not_strictly_increasing(#[case] sample_indices: [u32; 2]) {
+      let error = plan(
+         &sample_indices,
+         &fixed_samples(2, 4),
+         &[0, 4],
+         TEST_LIMITS,
+         &mut SampleReadBudget::default(),
+      )
+      .unwrap_err();
 
-         assert!(
-            error.to_string().contains("strictly increasing"),
-            "{sample_indices:?} must be rejected"
-         );
-      }
+      assert!(
+         error.to_string().contains("strictly increasing"),
+         "{sample_indices:?} must be rejected"
+      );
    }
 
    #[test]
@@ -1007,50 +963,49 @@ mod tests {
       assert!(error.to_string().contains("invalid sample size: 0 bytes"));
    }
 
-   #[test]
-   fn successful_charges_remain_in_the_shared_budget_across_calls() {
-      for limits in [
-         SampleReadLimits {
-            max_samples: 1,
-            ..TEST_LIMITS
-         },
-         SampleReadLimits {
-            max_logical_bytes: 4,
-            ..TEST_LIMITS
-         },
-         SampleReadLimits {
-            max_physical_bytes: 4,
-            ..TEST_LIMITS
-         },
-         SampleReadLimits {
-            max_regions: 1,
-            ..TEST_LIMITS
-         },
-      ] {
-         let mut budget = SampleReadBudget::default();
-         let first = plan(&[1], &fixed_samples(1, 4), &[0], limits, &mut budget).unwrap();
-         drop(first);
-         let charged = (
+   #[rstest]
+   #[case::sample_limit(SampleReadLimits {
+      max_samples: 1,
+      ..TEST_LIMITS
+   })]
+   #[case::logical_byte_limit(SampleReadLimits {
+      max_logical_bytes: 4,
+      ..TEST_LIMITS
+   })]
+   #[case::physical_byte_limit(SampleReadLimits {
+      max_physical_bytes: 4,
+      ..TEST_LIMITS
+   })]
+   #[case::region_limit(SampleReadLimits {
+      max_regions: 1,
+      ..TEST_LIMITS
+   })]
+   fn successful_charges_remain_in_the_shared_budget_across_calls(
+      #[case] limits: SampleReadLimits,
+   ) {
+      let mut budget = SampleReadBudget::default();
+      let first = plan(&[1], &fixed_samples(1, 4), &[0], limits, &mut budget).unwrap();
+      drop(first);
+      let charged = (
+         budget.samples,
+         budget.logical_bytes,
+         budget.physical_bytes,
+         budget.regions,
+      );
+
+      plan(&[1], &fixed_samples(1, 4), &[0], limits, &mut budget)
+         .expect_err("the second call must observe the first call's charges");
+
+      assert_eq!(
+         (
             budget.samples,
             budget.logical_bytes,
             budget.physical_bytes,
-            budget.regions,
-         );
-
-         plan(&[1], &fixed_samples(1, 4), &[0], limits, &mut budget)
-            .expect_err("the second call must observe the first call's charges");
-
-         assert_eq!(
-            (
-               budget.samples,
-               budget.logical_bytes,
-               budget.physical_bytes,
-               budget.regions
-            ),
-            charged,
-            "a rejected call must not refund prior charges"
-         );
-      }
+            budget.regions
+         ),
+         charged,
+         "a rejected call must not refund prior charges"
+      );
    }
 
    #[test]
@@ -1122,59 +1077,59 @@ mod tests {
       }
    }
 
+   #[rstest]
+   #[case::physical_byte_limit(
+      vec![0; 12],
+      vec![0, 8],
+      SampleReadLimits {
+         max_physical_bytes: 11,
+         ..TEST_LIMITS
+      },
+   )]
+   #[case::region_limit(
+      vec![0; 104],
+      vec![0, 100],
+      SampleReadLimits {
+         max_regions: 1,
+         ..TEST_LIMITS
+      },
+   )]
    #[tokio::test]
-   async fn physical_and_region_failures_do_not_read_or_charge_the_budget() {
-      let cases = [
+   async fn physical_and_region_failures_do_not_read_or_charge_the_budget(
+      #[case] bytes: Vec<u8>,
+      #[case] offsets: Vec<u64>,
+      #[case] limits: SampleReadLimits,
+   ) {
+      let reader = RecordingReader {
+         bytes,
+         reads: AtomicUsize::new(0),
+         regions: Mutex::new(Vec::new()),
+      };
+      let mut budget = SampleReadBudget::default();
+
+      read_samples_coalesced(
+         &reader,
+         &[1, 2],
+         &fixed_samples(2, 4),
+         &one_sample_per_chunk(),
+         &offsets,
+         limits,
+         &mut budget,
+      )
+      .await
+      .expect_err("planning must reject the physical or region limit");
+
+      assert_eq!(reader.reads.load(Ordering::Relaxed), 0);
+      assert!(reader.regions.lock().unwrap().is_empty());
+      assert_eq!(
          (
-            vec![0; 12],
-            vec![0, 8],
-            SampleReadLimits {
-               max_physical_bytes: 11,
-               ..TEST_LIMITS
-            },
+            budget.samples,
+            budget.logical_bytes,
+            budget.physical_bytes,
+            budget.regions
          ),
-         (
-            vec![0; 104],
-            vec![0, 100],
-            SampleReadLimits {
-               max_regions: 1,
-               ..TEST_LIMITS
-            },
-         ),
-      ];
-
-      for (bytes, offsets, limits) in cases {
-         let reader = RecordingReader {
-            bytes,
-            reads: AtomicUsize::new(0),
-            regions: Mutex::new(Vec::new()),
-         };
-         let mut budget = SampleReadBudget::default();
-
-         read_samples_coalesced(
-            &reader,
-            &[1, 2],
-            &fixed_samples(2, 4),
-            &one_sample_per_chunk(),
-            &offsets,
-            limits,
-            &mut budget,
-         )
-         .await
-         .expect_err("planning must reject the physical or region limit");
-
-         assert_eq!(reader.reads.load(Ordering::Relaxed), 0);
-         assert!(reader.regions.lock().unwrap().is_empty());
-         assert_eq!(
-            (
-               budget.samples,
-               budget.logical_bytes,
-               budget.physical_bytes,
-               budget.regions
-            ),
-            (0, 0, 0, 0)
-         );
-      }
+         (0, 0, 0, 0)
+      );
    }
 
    #[tokio::test]

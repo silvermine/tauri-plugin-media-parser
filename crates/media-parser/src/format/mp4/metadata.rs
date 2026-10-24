@@ -178,6 +178,7 @@ fn parse_ilst_entries(ilst: &[u8], values: &mut Vec<types::Meta>) {
 mod tests {
    use super::*;
    use async_trait::async_trait;
+   use rstest::rstest;
 
    fn mp4_box(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
       let mut data = ((8 + payload.len()) as u32).to_be_bytes().to_vec();
@@ -245,35 +246,38 @@ mod tests {
       assert_eq!((metadata.timescale, metadata.duration), (1000, 5000));
    }
 
+   #[rstest]
+   #[case::variable_sample_durations(&[(10, 40), (20, 20)], 37.5)]
+   #[case::shared_duration_semantics_for_zero_delta(&[(1, 40), (1, 0)], 50.0)]
    #[tokio::test]
-   async fn metadata_frame_rate_averages_variable_sample_durations() {
-      let metadata =
-         metadata_with_tracks(&[timing_track(b"vide", 1000, &[(10, 40), (20, 20)])]).await;
-      assert_eq!(metadata.frame_rate, Some(37.5));
+   async fn metadata_frame_rate_averages_stts_sample_durations(
+      #[case] entries: &[(u32, u32)],
+      #[case] frame_rate: f64,
+   ) {
+      let metadata = metadata_with_tracks(&[timing_track(b"vide", 1000, entries)]).await;
+      assert_eq!(metadata.frame_rate, Some(frame_rate));
    }
 
+   #[rstest]
+   #[case::no_tracks(vec![])]
+   #[case::sound_only(vec![timing_track(b"soun", 48_000, &[(100, 1024)])])]
    #[tokio::test]
-   async fn metadata_frame_rate_is_absent_without_video() {
-      for tracks in [vec![], vec![timing_track(b"soun", 48_000, &[(100, 1024)])]] {
-         assert_eq!(metadata_with_tracks(&tracks).await.frame_rate, None);
-      }
+   async fn metadata_frame_rate_is_absent_without_video(#[case] tracks: Vec<Vec<u8>>) {
+      assert_eq!(metadata_with_tracks(&tracks).await.frame_rate, None);
    }
 
+   #[rstest]
+   #[case::zero_timescale(timing_track(b"vide", 0, &[(1, 40)]))]
+   #[case::empty_stts(timing_track(b"vide", 1000, &[]))]
+   #[case::zero_sample_count(timing_track(b"vide", 1000, &[(0, 40)]))]
+   #[case::zero_sample_delta(timing_track(b"vide", 1000, &[(1, 0)]))]
+   #[case::sample_count_overflow(timing_track(b"vide", 1000, &[(u32::MAX, 1), (1, 1)]))]
+   #[case::duration_overflow(timing_track(b"vide", 1000, &[(u32::MAX, u32::MAX); 2]))]
    #[tokio::test]
-   async fn metadata_frame_rate_does_not_skip_video_with_invalid_timing() {
-      for first in [
-         timing_track(b"vide", 0, &[(1, 40)]),
-         timing_track(b"vide", 1000, &[]),
-         timing_track(b"vide", 1000, &[(0, 40)]),
-         timing_track(b"vide", 1000, &[(1, 0)]),
-         timing_track(b"vide", 1000, &[(u32::MAX, 1), (1, 1)]),
-         timing_track(b"vide", 1000, &[(u32::MAX, u32::MAX); 2]),
-      ] {
-         let metadata =
-            metadata_with_tracks(&[first, timing_track(b"vide", 1000, &[(25, 40)])]).await;
-         assert_eq!(metadata.frame_rate, None);
-         assert_eq!(metadata.duration, 5000);
-      }
+   async fn metadata_frame_rate_does_not_skip_video_with_invalid_timing(#[case] first: Vec<u8>) {
+      let metadata = metadata_with_tracks(&[first, timing_track(b"vide", 1000, &[(25, 40)])]).await;
+      assert_eq!(metadata.frame_rate, None);
+      assert_eq!(metadata.duration, 5000);
    }
 
    #[tokio::test]
@@ -290,12 +294,6 @@ mod tests {
    }
 
    #[tokio::test]
-   async fn metadata_frame_rate_uses_shared_duration_semantics_for_zero_delta() {
-      let metadata = metadata_with_tracks(&[timing_track(b"vide", 1000, &[(1, 40), (1, 0)])]).await;
-      assert_eq!(metadata.frame_rate, Some(50.0));
-   }
-
-   #[tokio::test]
    async fn metadata_frame_rate_supports_version_one_media_header() {
       let mut mdhd = vec![0; 36];
       mdhd[0] = 1;
@@ -306,16 +304,18 @@ mod tests {
       assert!((metadata.frame_rate.unwrap() - 24_000.0 / 1001.0).abs() < 1e-10);
    }
 
+   #[rstest]
+   #[case::missing_mdhd(b"mdhd")]
+   #[case::missing_stts(b"stts")]
    #[tokio::test]
-   async fn metadata_frame_rate_is_absent_when_first_video_lacks_timing_boxes() {
-      for missing in [b"mdhd", b"stts"] {
-         let mut first = timing_track(b"vide", 1000, &[(25, 40)]);
-         let offset = first.windows(4).position(|bytes| bytes == missing).unwrap();
-         first[offset..offset + 4].copy_from_slice(b"free");
-         let metadata =
-            metadata_with_tracks(&[first, timing_track(b"vide", 1000, &[(30, 20)])]).await;
-         assert_eq!(metadata.frame_rate, None);
-      }
+   async fn metadata_frame_rate_is_absent_when_first_video_lacks_timing_boxes(
+      #[case] missing: &[u8; 4],
+   ) {
+      let mut first = timing_track(b"vide", 1000, &[(25, 40)]);
+      let offset = first.windows(4).position(|bytes| bytes == missing).unwrap();
+      first[offset..offset + 4].copy_from_slice(b"free");
+      let metadata = metadata_with_tracks(&[first, timing_track(b"vide", 1000, &[(30, 20)])]).await;
+      assert_eq!(metadata.frame_rate, None);
    }
 
    #[async_trait]
@@ -349,23 +349,21 @@ mod tests {
       assert_eq!(metadata.duration, 5000);
    }
 
-   #[test]
-   fn test_fourcc_to_key() {
-      assert_eq!(fourcc_to_key([0xA9, b'n', b'a', b'm']), "@nam");
-      assert_eq!(fourcc_to_key([0xA9, b'A', b'R', b'T']), "@ART");
-      assert_eq!(fourcc_to_key(*b"cprt"), "cprt");
-      assert_eq!(fourcc_to_key(*b"trkn"), "trkn");
+   #[rstest]
+   #[case::quicktime_nam([0xA9, b'n', b'a', b'm'], "@nam")]
+   #[case::quicktime_art([0xA9, b'A', b'R', b'T'], "@ART")]
+   #[case::itunes_cprt(*b"cprt", "cprt")]
+   #[case::itunes_trkn(*b"trkn", "trkn")]
+   fn test_fourcc_to_key(#[case] fourcc: [u8; 4], #[case] key: &str) {
+      assert_eq!(fourcc_to_key(fourcc), key);
    }
 
-   #[test]
-   fn test_tag_name_known() {
-      assert_eq!(tag_name([0xA9, b'n', b'a', b'm']), "Title");
-      assert_eq!(tag_name([0xA9, b'A', b'R', b'T']), "Artist");
-      assert_eq!(tag_name(*b"cprt"), "Copyright");
-   }
-
-   #[test]
-   fn test_tag_name_unknown() {
-      assert_eq!(tag_name(*b"xxxx"), "Unknown");
+   #[rstest]
+   #[case::title([0xA9, b'n', b'a', b'm'], "Title")]
+   #[case::artist([0xA9, b'A', b'R', b'T'], "Artist")]
+   #[case::copyright(*b"cprt", "Copyright")]
+   #[case::unknown_ascii_fourcc(*b"xxxx", "Unknown")]
+   fn test_tag_name(#[case] fourcc: [u8; 4], #[case] name: &str) {
+      assert_eq!(tag_name(fourcc), name);
    }
 }

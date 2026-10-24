@@ -344,6 +344,7 @@ mod tests {
       decode_sample_with_reservation_count,
    };
    use crate::MediaParserError;
+   use rstest::rstest;
 
    fn mp4_box(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
       let size = 8_u32 + u32::try_from(payload.len()).unwrap();
@@ -376,135 +377,7 @@ mod tests {
       assert!(matches!(error, MediaParserError::Other(_)));
    }
 
-   #[test]
-   fn tx3g_decodes_strict_utf8() {
-      assert_eq!(
-         decode_sample("tx3g", &length_prefixed_text(" café ".as_bytes(), &[]),).unwrap(),
-         Some("café".into())
-      );
-   }
-
-   #[test]
-   fn tx3g_decodes_bom_utf16_big_endian() {
-      let bytes = [0xfe, 0xff, 0x00, b' ', 0x00, b'O', 0x00, b'K', 0x00, b' '];
-      assert_eq!(
-         decode_sample("tx3g", &length_prefixed_text(&bytes, &[])).unwrap(),
-         Some("OK".into())
-      );
-   }
-
-   #[test]
-   fn tx3g_decodes_bom_utf16_little_endian() {
-      let bytes = [0xff, 0xfe, b' ', 0x00, b'O', 0x00, b'K', 0x00, b' ', 0x00];
-      assert_eq!(
-         decode_sample("tx3g", &length_prefixed_text(&bytes, &[])).unwrap(),
-         Some("OK".into())
-      );
-   }
-
-   #[test]
-   fn tx3g_treats_a_utf16_bom_without_text_as_a_gap() {
-      assert_eq!(
-         decode_sample("tx3g", &length_prefixed_text(&[0xfe, 0xff], &[])).unwrap(),
-         None
-      );
-      assert_eq!(
-         decode_sample("tx3g", &length_prefixed_text(&[0xff, 0xfe], &[])).unwrap(),
-         None
-      );
-   }
-
-   #[test]
-   fn tx3g_decodes_a_utf16_supplementary_plane_character() {
-      let bytes = [0xfe, 0xff, 0xd8, 0x3d, 0xde, 0x00];
-      assert_eq!(
-         decode_sample("tx3g", &length_prefixed_text(&bytes, &[])).unwrap(),
-         Some("😀".into())
-      );
-   }
-
-   #[test]
-   fn tx3g_rejects_isolated_or_unpaired_utf16_surrogates() {
-      assert_subtitle_error(decode_sample(
-         "tx3g",
-         &length_prefixed_text(&[0xfe, 0xff, 0xdc, 0x00], &[]),
-      ));
-      assert_subtitle_error(decode_sample(
-         "tx3g",
-         &length_prefixed_text(&[0xfe, 0xff, 0xd8, 0x00], &[]),
-      ));
-      assert_subtitle_error(decode_sample(
-         "tx3g",
-         &length_prefixed_text(&[0xfe, 0xff, 0xd8, 0x00, 0x00, b'A'], &[]),
-      ));
-   }
-
-   #[test]
-   fn tx3g_falls_back_to_bomless_utf16_big_endian() {
-      let bytes = [0x00, 0x20, 0x00, 0xe9, 0x00, 0x20];
-      assert_eq!(
-         decode_sample("tx3g", &length_prefixed_text(&bytes, &[])).unwrap(),
-         Some("é".into())
-      );
-   }
-
-   #[test]
-   fn tx3g_requires_a_complete_declared_text_slice() {
-      assert_subtitle_error(decode_sample("tx3g", &[]));
-      assert_subtitle_error(decode_sample("tx3g", &[0]));
-      assert_subtitle_error(decode_sample("tx3g", &[0, 3, b'a', b'b']));
-   }
-
-   #[test]
-   fn tx3g_ignores_trailing_style_records() {
-      let data = length_prefixed_text(b"caption", &[0xff, 0xfe, 0xfd, 0xfc]);
-      assert_eq!(
-         decode_sample("tx3g", &data).unwrap(),
-         Some("caption".into())
-      );
-   }
-
-   #[test]
-   fn tx3g_rejects_invalid_utf8_and_utf16() {
-      assert_subtitle_error(decode_sample("tx3g", &length_prefixed_text(&[0xff], &[])));
-      assert_subtitle_error(decode_sample(
-         "tx3g",
-         &length_prefixed_text(&[0xd8, 0x00], &[]),
-      ));
-      assert_subtitle_error(decode_sample(
-         "tx3g",
-         &length_prefixed_text(&[0xfe, 0xff, 0x00], &[]),
-      ));
-   }
-
-   #[test]
-   fn tx3g_empty_or_trimmed_empty_is_a_gap() {
-      assert_eq!(decode_sample("tx3g", &[0, 0]).unwrap(), None);
-      assert_eq!(
-         decode_sample("tx3g", &length_prefixed_text(b" \t\r\n\0 ", &[])).unwrap(),
-         None
-      );
-   }
-
-   #[test]
-   fn wvtt_decodes_direct_payload() {
-      assert_eq!(
-         decode_sample("wvtt", &mp4_box(b"payl", b" hello ")).unwrap(),
-         Some("hello".into())
-      );
-   }
-
-   #[test]
-   fn wvtt_decodes_payload_nested_in_vttc() {
-      let sample = mp4_box(b"vttc", &mp4_box(b"payl", b"nested"));
-      assert_eq!(
-         decode_sample("wvtt", &sample).unwrap(),
-         Some("nested".into())
-      );
-   }
-
-   #[test]
-   fn wvtt_joins_all_non_gap_payloads_in_source_order() {
+   fn wvtt_payloads_among_ignored_boxes() -> Vec<u8> {
       let mut children = mp4_box(b"payl", b"second");
       children.extend(mp4_box(b"iden", b"ignored"));
       children.extend(mp4_box(b"payl", b" third "));
@@ -513,106 +386,137 @@ mod tests {
       sample.extend(mp4_box(b"junk", b"ignored"));
       sample.extend(mp4_box(b"vttc", &children));
       sample.extend(mp4_box(b"payl", b"fourth"));
-
-      assert_eq!(
-         decode_sample("wvtt", &sample).unwrap(),
-         Some("first\nsecond\nthird\nfourth".into())
-      );
+      sample
    }
 
-   #[test]
-   fn wvtt_ignores_unknown_well_formed_boxes() {
+   fn wvtt_unknown_well_formed_boxes() -> Vec<u8> {
       let nested_unknown = mp4_box(b"vttc", &mp4_box(b"sttg", b"line:0"));
       let mut sample = mp4_box(b"free", b"anything");
       sample.extend(nested_unknown);
-      assert_eq!(decode_sample("wvtt", &sample).unwrap(), None);
+      sample
    }
 
-   #[test]
-   fn wvtt_rejects_malformed_top_level_box_framing() {
-      let malformed = [
-         vec![0, 0, 0, 12, b'p', b'a', b'y', b'l'],
-         vec![0, 0, 0, 0, b'p', b'a', b'y', b'l'],
-         vec![0, 0, 0, 4, b'p', b'a', b'y', b'l'],
-         vec![
-            0, 0, 0, 1, b'p', b'a', b'y', b'l', 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-         ],
-      ];
-      for data in malformed {
-         assert_subtitle_error(decode_sample("wvtt", &data));
-      }
+   #[rstest]
+   #[case::tx3g_strict_utf8("tx3g", length_prefixed_text(" café ".as_bytes(), &[]), Some("café"))]
+   #[case::tx3g_bom_utf16_big_endian(
+      "tx3g",
+      length_prefixed_text(&[0xfe, 0xff, 0x00, b' ', 0x00, b'O', 0x00, b'K', 0x00, b' '], &[]),
+      Some("OK"),
+   )]
+   #[case::tx3g_bom_utf16_little_endian(
+      "tx3g",
+      length_prefixed_text(&[0xff, 0xfe, b' ', 0x00, b'O', 0x00, b'K', 0x00, b' ', 0x00], &[]),
+      Some("OK"),
+   )]
+   #[case::tx3g_big_endian_bom_without_text("tx3g", length_prefixed_text(&[0xfe, 0xff], &[]), None)]
+   #[case::tx3g_little_endian_bom_without_text(
+      "tx3g",
+      length_prefixed_text(&[0xff, 0xfe], &[]),
+      None,
+   )]
+   #[case::tx3g_utf16_supplementary_plane_character(
+      "tx3g",
+      length_prefixed_text(&[0xfe, 0xff, 0xd8, 0x3d, 0xde, 0x00], &[]),
+      Some("😀"),
+   )]
+   #[case::tx3g_bomless_utf16_big_endian_fallback(
+      "tx3g",
+      length_prefixed_text(&[0x00, 0x20, 0x00, 0xe9, 0x00, 0x20], &[]),
+      Some("é"),
+   )]
+   #[case::tx3g_trailing_style_records(
+      "tx3g",
+      length_prefixed_text(b"caption", &[0xff, 0xfe, 0xfd, 0xfc]),
+      Some("caption"),
+   )]
+   #[case::tx3g_empty("tx3g", vec![0, 0], None)]
+   #[case::tx3g_trimmed_empty("tx3g", length_prefixed_text(b" \t\r\n\0 ", &[]), None)]
+   #[case::wvtt_direct_payload("wvtt", mp4_box(b"payl", b" hello "), Some("hello"))]
+   #[case::wvtt_payload_nested_in_vttc(
+      "wvtt",
+      mp4_box(b"vttc", &mp4_box(b"payl", b"nested")),
+      Some("nested"),
+   )]
+   #[case::wvtt_non_gap_payloads_joined_in_source_order(
+      "wvtt",
+      wvtt_payloads_among_ignored_boxes(),
+      Some("first\nsecond\nthird\nfourth")
+   )]
+   #[case::wvtt_unknown_well_formed_boxes("wvtt", wvtt_unknown_well_formed_boxes(), None)]
+   #[case::wvtt_empty("wvtt", vec![], None)]
+   #[case::wvtt_empty_vttc("wvtt", mp4_box(b"vttc", &[]), None)]
+   #[case::wvtt_whitespace_payload("wvtt", mp4_box(b"payl", b" \0\t "), None)]
+   #[case::stpp_strict_utf8("stpp", b" <p>cue</p>\0 ".to_vec(), Some("<p>cue</p>"))]
+   #[case::text_bom_utf16_little_endian(
+      "text",
+      length_prefixed_text(&[0xff, 0xfe, b'O', 0, b'K', 0], &[]),
+      Some("OK"),
+   )]
+   #[case::text_trimmed_empty("text", length_prefixed_text(b" \n\0\t", &[]), None)]
+   #[case::text_multibyte_unicode_whitespace_at_both_boundaries(
+      "text",
+      length_prefixed_text("\u{2003}é\u{3000}".as_bytes(), &[]),
+      Some("é"),
+   )]
+   #[case::text_trailing_style_atom_with_non_utf8_bytes(
+      "text",
+      length_prefixed_text(b"Fourteen bytes", &mp4_box(b"styl", &[0x80])),
+      Some("Fourteen bytes"),
+   )]
+   fn decodes_text_or_a_gap(
+      #[case] codec: &str,
+      #[case] data: Vec<u8>,
+      #[case] expected: Option<&str>,
+   ) {
+      assert_eq!(decode_sample(codec, &data).unwrap().as_deref(), expected);
+   }
 
+   #[rstest]
+   #[case::tx3g_isolated_low_surrogate(
+      "tx3g",
+      length_prefixed_text(&[0xfe, 0xff, 0xdc, 0x00], &[]),
+   )]
+   #[case::tx3g_unpaired_high_surrogate_at_the_end(
+      "tx3g",
+      length_prefixed_text(&[0xfe, 0xff, 0xd8, 0x00], &[]),
+   )]
+   #[case::tx3g_high_surrogate_before_a_non_surrogate(
+      "tx3g",
+      length_prefixed_text(&[0xfe, 0xff, 0xd8, 0x00, 0x00, b'A'], &[]),
+   )]
+   #[case::tx3g_missing_length("tx3g", vec![])]
+   #[case::tx3g_truncated_length("tx3g", vec![0])]
+   #[case::tx3g_text_shorter_than_declared("tx3g", vec![0, 3, b'a', b'b'])]
+   #[case::tx3g_invalid_utf8("tx3g", length_prefixed_text(&[0xff], &[]))]
+   #[case::tx3g_invalid_bomless_utf16("tx3g", length_prefixed_text(&[0xd8, 0x00], &[]))]
+   #[case::tx3g_odd_length_bom_utf16("tx3g", length_prefixed_text(&[0xfe, 0xff, 0x00], &[]))]
+   #[case::wvtt_nested_zero_size_box(
+      "wvtt",
+      mp4_box(b"vttc", &[0, 0, 0, 0, b'p', b'a', b'y', b'l']),
+   )]
+   #[case::wvtt_nested_truncated_box_header("wvtt", mp4_box(b"vttc", &[1, 2, 3]))]
+   #[case::stpp_invalid_utf8("stpp", vec![0xff])]
+   #[case::text_shorter_than_declared("text", vec![0, 3, b'a', b'b'])]
+   fn rejects_malformed_samples(#[case] codec: &str, #[case] data: Vec<u8>) {
+      assert_subtitle_error(decode_sample(codec, &data));
+   }
+
+   fn payl_with_trailing_bytes() -> Vec<u8> {
       let mut trailing = mp4_box(b"payl", b"ok");
       trailing.extend_from_slice(&[1, 2, 3]);
-      assert_subtitle_error(decode_sample("wvtt", &trailing));
+      trailing
    }
 
-   #[test]
-   fn wvtt_rejects_malformed_nested_box_framing() {
-      let sample = mp4_box(b"vttc", &[0, 0, 0, 0, b'p', b'a', b'y', b'l']);
-      assert_subtitle_error(decode_sample("wvtt", &sample));
-
-      let sample = mp4_box(b"vttc", &[1, 2, 3]);
-      assert_subtitle_error(decode_sample("wvtt", &sample));
-   }
-
-   #[test]
-   fn wvtt_without_nonempty_payload_is_a_gap() {
-      assert_eq!(decode_sample("wvtt", &[]).unwrap(), None);
-      assert_eq!(decode_sample("wvtt", &mp4_box(b"vttc", &[])).unwrap(), None);
-      assert_eq!(
-         decode_sample("wvtt", &mp4_box(b"payl", b" \0\t ")).unwrap(),
-         None
-      );
-   }
-
-   #[test]
-   fn stpp_and_text_use_strict_deterministic_decoding_and_trimming() {
-      assert_eq!(
-         decode_sample("stpp", b" <p>cue</p>\0 ").unwrap(),
-         Some("<p>cue</p>".into())
-      );
-      assert_eq!(
-         decode_sample(
-            "text",
-            &length_prefixed_text(&[0xff, 0xfe, b'O', 0, b'K', 0], &[]),
-         )
-         .unwrap(),
-         Some("OK".into())
-      );
-      assert_eq!(
-         decode_sample("text", &length_prefixed_text(b" \n\0\t", &[])).unwrap(),
-         None
-      );
-      assert_subtitle_error(decode_sample("stpp", &[0xff]));
-   }
-
-   #[test]
-   fn text_trims_multibyte_unicode_whitespace_at_both_boundaries() {
-      assert_eq!(
-         decode_sample(
-            "text",
-            &length_prefixed_text("\u{2003}é\u{3000}".as_bytes(), &[]),
-         )
-         .unwrap(),
-         Some("é".into())
-      );
-   }
-
-   #[test]
-   fn text_ignores_a_trailing_style_atom_with_non_utf8_bytes() {
-      let style = mp4_box(b"styl", &[0x80]);
-      let sample = length_prefixed_text(b"Fourteen bytes", &style);
-
-      assert_eq!(
-         decode_sample("text", &sample).unwrap(),
-         Some("Fourteen bytes".into())
-      );
-   }
-
-   #[test]
-   fn text_requires_a_complete_declared_text_slice() {
-      assert_subtitle_error(decode_sample("text", &[0, 3, b'a', b'b']));
+   #[rstest]
+   #[case::size_past_end(vec![0, 0, 0, 12, b'p', b'a', b'y', b'l'])]
+   #[case::zero_size(vec![0, 0, 0, 0, b'p', b'a', b'y', b'l'])]
+   #[case::size_below_header(vec![0, 0, 0, 4, b'p', b'a', b'y', b'l'])]
+   #[case::largesize_past_end(vec![
+      0, 0, 0, 1, b'p', b'a', b'y', b'l', 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+   ])]
+   #[case::trailing_bytes(payl_with_trailing_bytes())]
+   fn wvtt_rejects_malformed_top_level_box_framing(#[case] data: Vec<u8>) {
+      assert_subtitle_error(decode_sample("wvtt", &data));
    }
 
    #[test]
@@ -625,27 +529,19 @@ mod tests {
       assert_eq!(codec, "c608");
    }
 
-   #[test]
-   fn unsupported_codec_capacity_refusal_is_fatal() {
-      assert_fatal(decode_sample_with_limit("c608", b"caption", 3));
-   }
-
-   #[test]
-   fn capacity_refusal_is_fatal_for_utf8_utf16_and_wvtt_joining() {
-      assert_fatal(decode_sample_with_limit(
-         "text",
-         &length_prefixed_text(b"valid", &[]),
-         4,
-      ));
-      assert_fatal(decode_sample_with_limit(
-         "text",
-         &length_prefixed_text(&[0xfe, 0xff, 0x4f, 0x60], &[]),
-         2,
-      ));
-
+   fn two_wvtt_payloads() -> Vec<u8> {
       let mut sample = mp4_box(b"payl", b"ab");
       sample.extend(mp4_box(b"payl", b"cd"));
-      assert_fatal(decode_sample_with_limit("wvtt", &sample, 4));
+      sample
+   }
+
+   #[rstest]
+   #[case::unsupported_codec("c608", b"caption".to_vec(), 3)]
+   #[case::utf8("text", length_prefixed_text(b"valid", &[]), 4)]
+   #[case::utf16("text", length_prefixed_text(&[0xfe, 0xff, 0x4f, 0x60], &[]), 2)]
+   #[case::wvtt_joining("wvtt", two_wvtt_payloads(), 4)]
+   fn capacity_refusal_is_fatal(#[case] codec: &str, #[case] data: Vec<u8>, #[case] limit: usize) {
+      assert_fatal(decode_sample_with_limit(codec, &data, limit));
    }
 
    #[test]

@@ -74,12 +74,16 @@ pub(super) fn track_properties(
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
 
-   #[test]
-   fn decimal_string_matches_the_standard_formatting() {
-      for value in [0u64, 7, 10, 1_000, u64::MAX] {
-         assert_eq!(decimal_string(value).unwrap(), value.to_string());
-      }
+   #[rstest]
+   #[case::zero(0)]
+   #[case::single_digit(7)]
+   #[case::two_digits(10)]
+   #[case::trailing_zeros(1_000)]
+   #[case::u64_max(u64::MAX)]
+   fn decimal_string_matches_the_standard_formatting(#[case] value: u64) {
+      assert_eq!(decimal_string(value).unwrap(), value.to_string());
    }
 
    #[test]

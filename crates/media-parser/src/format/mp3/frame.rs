@@ -331,6 +331,7 @@ pub async fn find_first_frame(
 mod tests {
    use super::*;
    use async_trait::async_trait;
+   use rstest::rstest;
 
    struct BytesReader(Vec<u8>);
 
@@ -397,23 +398,12 @@ mod tests {
       assert_eq!(header.sample_rate_hz, 48000);
    }
 
-   #[test]
-   fn test_parse_header_invalid_sync() {
-      let bytes = [0x00, 0x00, 0x00, 0x00];
-      assert!(parse_header(bytes).is_none());
-
-      let bytes = [0xFF, 0x00, 0x00, 0x00];
-      assert!(parse_header(bytes).is_none());
-   }
-
-   #[test]
-   fn test_parse_header_reserved_values() {
-      // Reserved layer (0b00)
-      let bytes = [0xFF, 0xF1, 0x90, 0x00];
-      assert!(parse_header(bytes).is_none());
-
-      // Reserved version (0b01)
-      let bytes = [0xFF, 0xEB, 0x90, 0x00];
+   #[rstest]
+   #[case::all_zero([0x00, 0x00, 0x00, 0x00])]
+   #[case::sync_byte_only([0xFF, 0x00, 0x00, 0x00])]
+   #[case::reserved_layer_0b00([0xFF, 0xF1, 0x90, 0x00])]
+   #[case::reserved_version_0b01([0xFF, 0xEB, 0x90, 0x00])]
+   fn test_parse_header_rejects_invalid_headers(#[case] bytes: [u8; 4]) {
       assert!(parse_header(bytes).is_none());
    }
 
@@ -448,27 +438,19 @@ mod tests {
       assert_eq!(header.duration_us(), 26122);
    }
 
-   #[test]
-   fn test_frame_header_xing_offset() {
-      let stereo = FrameHeader {
+   #[rstest]
+   #[case::stereo(0, 32)]
+   #[case::mono(3, 17)]
+   fn test_frame_header_xing_offset(#[case] channel_mode: u8, #[case] expected: usize) {
+      let header = FrameHeader {
          version: MpegVersion::V1,
          layer: MpegLayer::Layer3,
          bitrate_kbps: 128,
          sample_rate_hz: 44100,
          padding: false,
-         channel_mode: 0, // stereo
+         channel_mode,
       };
-      assert_eq!(stereo.xing_offset(), 32);
-
-      let mono = FrameHeader {
-         version: MpegVersion::V1,
-         layer: MpegLayer::Layer3,
-         bitrate_kbps: 128,
-         sample_rate_hz: 44100,
-         padding: false,
-         channel_mode: 3, // mono
-      };
-      assert_eq!(mono.xing_offset(), 17);
+      assert_eq!(header.xing_offset(), expected);
    }
 
    #[test]
@@ -479,9 +461,9 @@ mod tests {
       assert!(first.is_compatible_with(&next));
    }
 
-   #[test]
-   fn test_frame_parse_result_methods() {
-      let found = FrameParseResult::Found {
+   #[rstest]
+   #[case::found(
+      FrameParseResult::Found {
          header: FrameHeader {
             version: MpegVersion::V1,
             layer: MpegLayer::Layer3,
@@ -491,36 +473,36 @@ mod tests {
             channel_mode: 0,
          },
          offset: 100,
-      };
-
-      assert!(found.is_found());
-      assert_eq!(found.offset(), Some(100));
-      assert!(found.header().is_some());
-
-      let not_found = FrameParseResult::NotFound;
-      assert!(!not_found.is_found());
-      assert_eq!(not_found.offset(), None);
-      assert!(not_found.header().is_none());
+      },
+      true,
+      Some(100)
+   )]
+   #[case::not_found(FrameParseResult::NotFound, false, None)]
+   fn test_frame_parse_result_methods(
+      #[case] result: FrameParseResult,
+      #[case] found: bool,
+      #[case] offset: Option<u64>,
+   ) {
+      assert_eq!(result.is_found(), found);
+      assert_eq!(result.offset(), offset);
+      assert_eq!(result.header().is_some(), found);
    }
 
+   #[rstest]
+   #[case::not_found_after_scanning_window(16, FrameParseResult::NotFound)]
+   #[case::end_of_data_for_short_input(FRAME_HEADER_SIZE - 1, FrameParseResult::EndOfData)]
    #[tokio::test]
-   async fn test_find_first_frame_returns_not_found_after_scanning_window() {
-      let reader = BytesReader(vec![0; 16]);
+   async fn test_find_first_frame_returns_no_frame_for_zeroed_input(
+      #[case] len: usize,
+      #[case] expected: FrameParseResult,
+   ) {
+      let reader = BytesReader(vec![0; len]);
+      let result = find_first_frame(&reader, 0, 16).await.unwrap();
 
-      assert!(matches!(
-         find_first_frame(&reader, 0, 16).await.unwrap(),
-         FrameParseResult::NotFound
-      ));
-   }
-
-   #[tokio::test]
-   async fn test_find_first_frame_returns_end_of_data_for_short_input() {
-      let reader = BytesReader(vec![0; FRAME_HEADER_SIZE - 1]);
-
-      assert!(matches!(
-         find_first_frame(&reader, 0, 16).await.unwrap(),
-         FrameParseResult::EndOfData
-      ));
+      assert_eq!(
+         std::mem::discriminant(&result),
+         std::mem::discriminant(&expected)
+      );
    }
 
    #[tokio::test]

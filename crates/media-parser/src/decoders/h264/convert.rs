@@ -277,6 +277,12 @@ mod tests {
    use super::super::color::GopColor;
    use super::super::frame::{Crop, PlanarYuv, Plane};
    use super::*;
+   use rstest::rstest;
+
+   const BT601_LIMITED: GopColor = GopColor {
+      matrix: MatrixCoefficients::Bt601,
+      full_range: false,
+   };
 
    fn converted(source: &PlanarYuv<'_>, size: ThumbnailSize) -> Vec<u8> {
       let (width, height) = thumbnail_dimensions(
@@ -361,70 +367,65 @@ mod tests {
       ]
    }
 
-   #[test]
-   fn bt601_limited_matches_independent_rgb_vectors() {
-      // Independently evaluated limited-range BT.601 inverse matrix:
-      // R = 1.164383*(Y-16) + 1.596027*(V-128)
-      // G = 1.164383*(Y-16) - 0.391762*(U-128) - 0.812968*(V-128)
-      // B = 1.164383*(Y-16) + 2.017232*(U-128)
-      // Clamp to [0, 255] and truncate, as required by the RGB output contract.
-      // Both signs of each chroma axis keep green away from clipping.
-      for (u, v, expected) in [
-         (128, 240, [255, 39, 130]),
-         (128, 16, [0, 221, 130]),
-         (240, 128, [130, 86, 255]),
-         (16, 128, [130, 174, 0]),
-      ] {
-         let y = [128; 8];
-         let u = [u; 2];
-         let v = [v; 2];
-         let uv = [u[0], v[0], u[1], v[1]];
-         let source = layouts(&y, &u, &v, &uv)[0];
-         for color in [
-            GopColor::DEFAULT,
-            GopColor {
-               matrix: MatrixCoefficients::Bt601,
-               full_range: false,
-            },
-         ] {
-            for (width, height) in [(4, 2), (2, 1)] {
-               let mut rgb = vec![0; width * height * 3];
-               write_rgb_with_color(&source, &mut rgb, width, height, color).unwrap();
-               assert_eq!(rgb, expected.repeat(width * height), "U={u:?}, V={v:?}");
-            }
-         }
-      }
+   // Independently evaluated limited-range BT.601 inverse matrix:
+   // R = 1.164383*(Y-16) + 1.596027*(V-128)
+   // G = 1.164383*(Y-16) - 0.391762*(U-128) - 0.812968*(V-128)
+   // B = 1.164383*(Y-16) + 2.017232*(U-128)
+   // Clamp to [0, 255] and truncate, as required by the RGB output contract.
+   // Both signs of each chroma axis keep green away from clipping.
+   #[rstest]
+   #[case::positive_v(128, 240, [255, 39, 130])]
+   #[case::negative_v(128, 16, [0, 221, 130])]
+   #[case::positive_u(240, 128, [130, 86, 255])]
+   #[case::negative_u(16, 128, [130, 174, 0])]
+   fn bt601_limited_matches_independent_rgb_vectors(
+      #[case] u: u8,
+      #[case] v: u8,
+      #[case] expected: [u8; 3],
+      #[values(GopColor::DEFAULT, BT601_LIMITED)] color: GopColor,
+      #[values((4, 2), (2, 1))] size: (usize, usize),
+   ) {
+      let y = [128; 8];
+      let u = [u; 2];
+      let v = [v; 2];
+      let uv = [u[0], v[0], u[1], v[1]];
+      let source = layouts(&y, &u, &v, &uv)[0];
+      let (width, height) = size;
+      let mut rgb = vec![0; width * height * 3];
+      write_rgb_with_color(&source, &mut rgb, width, height, color).unwrap();
+      assert_eq!(rgb, expected.repeat(width * height), "U={u:?}, V={v:?}");
    }
 
-   #[test]
-   fn bt709_full_range_matches_independent_rgb_vectors() {
-      // Independently evaluated full-range BT.709 inverse matrix:
-      // R = Y + 1.574800*(V-128)
-      // G = Y - 0.187324*(U-128) - 0.468124*(V-128)
-      // B = Y + 1.855600*(U-128)
-      // Clamp to [0, 255] and truncate, as required by the RGB output contract.
-      // Unclipped channels and Y=128 passthrough reject limited-range expansion.
+   // Independently evaluated full-range BT.709 inverse matrix:
+   // R = Y + 1.574800*(V-128)
+   // G = Y - 0.187324*(U-128) - 0.468124*(V-128)
+   // B = Y + 1.855600*(U-128)
+   // Clamp to [0, 255] and truncate, as required by the RGB output contract.
+   // Unclipped channels and Y=128 passthrough reject limited-range expansion.
+   #[rstest]
+   #[case::positive_v(128, 192, [228, 98, 128])]
+   #[case::negative_v(128, 64, [27, 157, 128])]
+   #[case::positive_u(192, 128, [128, 116, 246])]
+   #[case::negative_u(64, 128, [128, 139, 9])]
+   fn bt709_full_range_matches_independent_rgb_vectors(
+      #[case] u: u8,
+      #[case] v: u8,
+      #[case] expected: [u8; 3],
+      #[values((4, 2), (2, 1))] size: (usize, usize),
+   ) {
       let color = GopColor {
          matrix: MatrixCoefficients::Bt709,
          full_range: true,
       };
-      for (u, v, expected) in [
-         (128, 192, [228, 98, 128]),
-         (128, 64, [27, 157, 128]),
-         (192, 128, [128, 116, 246]),
-         (64, 128, [128, 139, 9]),
-      ] {
-         let y = [128; 8];
-         let u = [u; 2];
-         let v = [v; 2];
-         let uv = [u[0], v[0], u[1], v[1]];
-         let source = layouts(&y, &u, &v, &uv)[0];
-         for (width, height) in [(4, 2), (2, 1)] {
-            let mut rgb = vec![0; width * height * 3];
-            write_rgb_with_color(&source, &mut rgb, width, height, color).unwrap();
-            assert_eq!(rgb, expected.repeat(width * height), "U={u:?}, V={v:?}");
-         }
-      }
+      let y = [128; 8];
+      let u = [u; 2];
+      let v = [v; 2];
+      let uv = [u[0], v[0], u[1], v[1]];
+      let source = layouts(&y, &u, &v, &uv)[0];
+      let (width, height) = size;
+      let mut rgb = vec![0; width * height * 3];
+      write_rgb_with_color(&source, &mut rgb, width, height, color).unwrap();
+      assert_eq!(rgb, expected.repeat(width * height), "U={u:?}, V={v:?}");
    }
 
    #[test]
@@ -466,8 +467,10 @@ mod tests {
       assert_eq!(converted(&nv21, size), expected);
    }
 
-   #[test]
-   fn crop_offsets_reach_both_conversion_loops() {
+   #[rstest]
+   #[case::unscaled(ThumbnailSize::new(4, 2).unwrap())]
+   #[case::resized(ThumbnailSize::new(2, 1).unwrap())]
+   fn crop_offsets_reach_the_conversion_loop(#[case] size: ThumbnailSize) {
       let y = [
          235, 235, 235, 235, 235, 235, 235, 235, 235, 235, 235, 235, 16, 16, 40, 60, 80, 100, 16,
          16, 50, 70, 90, 110,
@@ -505,12 +508,7 @@ mod tests {
       let tight_uv = [70, 210, 180, 40];
       let tight = layouts(&tight_y, &tight_u, &tight_v, &tight_uv)[0];
 
-      for size in [
-         ThumbnailSize::new(4, 2).unwrap(),
-         ThumbnailSize::new(2, 1).unwrap(),
-      ] {
-         assert_eq!(converted(&cropped, size), converted(&tight, size));
-      }
+      assert_eq!(converted(&cropped, size), converted(&tight, size));
    }
 
    #[test]

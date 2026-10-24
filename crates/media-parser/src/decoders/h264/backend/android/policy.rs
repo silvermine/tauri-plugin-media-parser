@@ -162,54 +162,64 @@ impl PumpProgress {
 mod tests {
    use super::*;
    use crate::decoders::h264::frame::{MAX_DECODED_NV12_BYTES, MAX_DECODED_NV12_DIMENSION};
+   use rstest::rstest;
 
    #[test]
    fn decoded_dimension_limit_is_inclusive() {
       assert_eq!(
-         validate_decoded_dimensions(MAX_DECODED_NV12_DIMENSION, MAX_DECODED_NV12_DIMENSION,),
+         validate_decoded_dimensions(MAX_DECODED_NV12_DIMENSION, MAX_DECODED_NV12_DIMENSION),
          Ok(())
       );
+   }
+
+   #[rstest]
+   #[case::width(MAX_DECODED_NV12_DIMENSION + 1, 1)]
+   #[case::height(1, MAX_DECODED_NV12_DIMENSION + 1)]
+   fn rejects_decoded_dimensions_over_the_limit(#[case] width: usize, #[case] height: usize) {
       assert!(matches!(
-         validate_decoded_dimensions(MAX_DECODED_NV12_DIMENSION + 1, 1),
+         validate_decoded_dimensions(width, height),
          Err(DecodeError::ResourceLimit(_))
       ));
-      assert!(matches!(
-         validate_decoded_dimensions(1, MAX_DECODED_NV12_DIMENSION + 1),
-         Err(DecodeError::ResourceLimit(_))
-      ));
+   }
+
+   #[test]
+   fn rejects_a_zero_decoded_width() {
       assert!(matches!(
          validate_decoded_dimensions(0, 1),
          Err(DecodeError::UnsupportedFormat(_))
       ));
    }
 
+   #[rstest]
+   #[case::even(2, 2, 6)]
+   #[case::odd(3, 3, 17)]
+   #[case::at_byte_limit(1, MAX_DECODED_NV12_BYTES / 2, MAX_DECODED_NV12_BYTES)]
+   fn compact_420_requirement_is_luma_plus_rounded_up_chroma(
+      #[case] width: usize,
+      #[case] height: usize,
+      #[case] expected: usize,
+   ) {
+      assert_eq!(checked_420_requirement(width, height), Ok(expected));
+   }
+
    #[test]
-   fn compact_420_handles_odd_dimensions_and_policy_boundaries() {
-      assert_eq!(checked_420_requirement(2, 2), Ok(6));
-      assert_eq!(checked_420_requirement(3, 3), Ok(17));
-      assert_eq!(
-         checked_420_requirement(1, MAX_DECODED_NV12_BYTES / 2),
-         Ok(MAX_DECODED_NV12_BYTES)
-      );
+   fn compact_420_rejects_requirements_over_the_byte_limit() {
       assert!(matches!(
          checked_420_requirement(1, MAX_DECODED_NV12_BYTES / 2 + 1),
          Err(DecodeError::ResourceLimit(_))
       ));
    }
 
-   #[test]
-   fn compact_420_rejects_arithmetic_overflow() {
-      for (width, height) in [
-         (usize::MAX, usize::MAX),
-         (1, usize::MAX),
-         (usize::MAX - 1, 2),
-         (2, usize::MAX / 2),
-      ] {
-         assert!(matches!(
-            checked_420_requirement(width, height),
-            Err(DecodeError::UnsupportedFormat(_))
-         ));
-      }
+   #[rstest]
+   #[case::max_by_max(usize::MAX, usize::MAX)]
+   #[case::one_by_max(1, usize::MAX)]
+   #[case::near_max_by_two(usize::MAX - 1, 2)]
+   #[case::two_by_half_max(2, usize::MAX / 2)]
+   fn compact_420_rejects_arithmetic_overflow(#[case] width: usize, #[case] height: usize) {
+      assert!(matches!(
+         checked_420_requirement(width, height),
+         Err(DecodeError::UnsupportedFormat(_))
+      ));
    }
 
    #[test]
@@ -218,6 +228,10 @@ mod tests {
          validate_decoded_buffer_len(MAX_DECODED_NV12_BYTES),
          Ok(MAX_DECODED_NV12_BYTES)
       );
+   }
+
+   #[test]
+   fn rejects_decoded_buffers_over_the_limit() {
       assert!(matches!(
          validate_decoded_buffer_len(MAX_DECODED_NV12_BYTES + 1),
          Err(DecodeError::ResourceLimit(_))
@@ -225,18 +239,28 @@ mod tests {
    }
 
    #[test]
-   fn reported_output_size_is_the_only_region_length() {
+   fn rejects_a_negative_reported_output_size() {
       assert!(matches!(
          validated_output_region_len(-1),
          Err(DecodeError::Backend(_))
       ));
-      assert_eq!(validated_output_region_len(0), Ok(None));
-      assert_eq!(
-         validated_output_region_len(
-            i32::try_from(MAX_DECODED_NV12_BYTES).expect("limit fits i32")
-         ),
-         Ok(Some(MAX_DECODED_NV12_BYTES))
-      );
+   }
+
+   #[rstest]
+   #[case::zero(0, None)]
+   #[case::at_limit(
+      i32::try_from(MAX_DECODED_NV12_BYTES).expect("limit fits i32"),
+      Some(MAX_DECODED_NV12_BYTES),
+   )]
+   fn reported_output_size_is_the_only_region_length(
+      #[case] reported_size: i32,
+      #[case] expected: Option<usize>,
+   ) {
+      assert_eq!(validated_output_region_len(reported_size), Ok(expected));
+   }
+
+   #[test]
+   fn rejects_a_reported_output_size_over_the_limit() {
       assert!(matches!(
          validated_output_region_len(
             i32::try_from(MAX_DECODED_NV12_BYTES + 1).expect("limit fits i32")
@@ -245,20 +269,26 @@ mod tests {
       ));
    }
 
+   #[rstest]
+   #[case::missing(None)]
+   #[case::zero(Some(0))]
+   fn max_input_size_must_be_present_and_positive(#[case] max_input_size: Option<usize>) {
+      assert!(matches!(
+         validate_max_input_size(max_input_size),
+         Err(DecodeError::UnsupportedFormat(_))
+      ));
+   }
+
    #[test]
-   fn max_input_size_must_be_positive_and_bounded() {
-      assert!(matches!(
-         validate_max_input_size(None),
-         Err(DecodeError::UnsupportedFormat(_))
-      ));
-      assert!(matches!(
-         validate_max_input_size(Some(0)),
-         Err(DecodeError::UnsupportedFormat(_))
-      ));
+   fn max_input_size_limit_is_inclusive() {
       assert_eq!(
          validate_max_input_size(Some(MAX_DECODED_NV12_BYTES)),
          Ok(MAX_DECODED_NV12_BYTES)
       );
+   }
+
+   #[test]
+   fn rejects_a_max_input_size_over_the_limit() {
       assert!(matches!(
          validate_max_input_size(Some(MAX_DECODED_NV12_BYTES + 1)),
          Err(DecodeError::ResourceLimit(_))
@@ -271,16 +301,23 @@ mod tests {
          validate_codec_dimensions(None),
          Err(DecodeError::BackendContract(message)) if message.contains("resolved_codec_dimensions")
       ));
-      assert_eq!(validate_codec_dimensions(Some((320, 240))), Ok((320, 240)));
    }
 
    #[test]
-   fn output_offset_does_not_change_the_reported_region() {
+   fn passes_resolved_codec_dimensions_through() {
+      assert_eq!(validate_codec_dimensions(Some((320, 240))), Ok((320, 240)));
+   }
+
+   #[rstest]
+   #[case::i32_min(i32::MIN)]
+   #[case::minus_one(-1)]
+   #[case::zero(0)]
+   #[case::one(1)]
+   #[case::i32_max(i32::MAX)]
+   fn output_offset_does_not_change_the_reported_region(#[case] offset: i32) {
       let base = std::ptr::dangling_mut::<u8>();
       let expected = OutputRegion { base, len: 12 };
-      for offset in [i32::MIN, -1, 0, 1, i32::MAX] {
-         assert_eq!(documented_output_region(base, 12, offset), expected);
-      }
+      assert_eq!(documented_output_region(base, 12, offset), expected);
    }
 
    #[test]

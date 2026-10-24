@@ -113,39 +113,32 @@ pub fn trim_null_and_whitespace(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
 
-   #[test]
-   fn test_decode_latin1() {
-      assert_eq!(decode_latin1(b"Hello"), Some("Hello".to_string()));
-      assert_eq!(decode_latin1(&[]), None);
+   #[rstest]
+   #[case::ascii(b"Hello", Some("Hello".to_string()))]
+   #[case::empty(&[], None)]
+   fn test_decode_latin1(#[case] data: &[u8], #[case] expected: Option<String>) {
+      assert_eq!(decode_latin1(data), expected);
    }
 
-   #[test]
-   fn test_decode_utf8() {
-      assert_eq!(decode_utf8(b"Hello"), Some("Hello".to_string()));
-      assert_eq!(decode_utf8("日本語".as_bytes()), Some("日本語".to_string()));
-      assert_eq!(decode_utf8(&[]), None);
+   #[rstest]
+   #[case::ascii(b"Hello", Some("Hello".to_string()))]
+   #[case::cjk("日本語".as_bytes(), Some("日本語".to_string()))]
+   #[case::empty(&[], None)]
+   fn test_decode_utf8(#[case] data: &[u8], #[case] expected: Option<String>) {
+      assert_eq!(decode_utf8(data), expected);
    }
 
-   #[test]
-   fn test_decode_utf16_be_bom() {
-      // BOM=FE FF (BE), "Hi"
-      let data = [0xFE, 0xFF, 0x00, 0x48, 0x00, 0x69];
-      assert_eq!(decode_utf16_with_bom(&data), Some("Hi".to_string()));
-   }
-
-   #[test]
-   fn test_decode_utf16_le_bom() {
-      // BOM=FF FE (LE), "Hi"
-      let data = [0xFF, 0xFE, 0x48, 0x00, 0x69, 0x00];
-      assert_eq!(decode_utf16_with_bom(&data), Some("Hi".to_string()));
-   }
-
-   #[test]
-   fn test_decode_utf16_no_bom() {
-      // No BOM, assumes BE, "Hi"
-      let data = [0x00, 0x48, 0x00, 0x69];
-      assert_eq!(decode_utf16_with_bom(&data), Some("Hi".to_string()));
+   #[rstest]
+   // BOM=FE FF (BE), "Hi"
+   #[case::be_bom(&[0xFE, 0xFF, 0x00, 0x48, 0x00, 0x69])]
+   // BOM=FF FE (LE), "Hi"
+   #[case::le_bom(&[0xFF, 0xFE, 0x48, 0x00, 0x69, 0x00])]
+   // No BOM, assumes BE, "Hi"
+   #[case::no_bom(&[0x00, 0x48, 0x00, 0x69])]
+   fn test_decode_utf16_with_bom(#[case] data: &[u8]) {
+      assert_eq!(decode_utf16_with_bom(data), Some("Hi".to_string()));
    }
 
    #[test]
@@ -172,34 +165,21 @@ mod tests {
       assert_eq!(decode_utf16_le(&[0x00, 0x48, 0x00]), None);
    }
 
-   #[test]
-   fn test_trim_null_and_whitespace() {
-      assert_eq!(
-         trim_null_and_whitespace("Hello\0\0"),
-         Some("Hello".to_string())
-      );
-      assert_eq!(
-         trim_null_and_whitespace("\0\0Hello\0\0"),
-         Some("Hello".to_string())
-      );
-      assert_eq!(
-         trim_null_and_whitespace("  Hello  "),
-         Some("Hello".to_string())
-      );
-      assert_eq!(trim_null_and_whitespace("\0\0\0"), None);
-      assert_eq!(trim_null_and_whitespace("   "), None);
-      assert_eq!(trim_null_and_whitespace(""), None);
+   #[rstest]
+   #[case::trailing_nulls("Hello\0\0", Some("Hello".to_string()))]
+   #[case::surrounding_nulls("\0\0Hello\0\0", Some("Hello".to_string()))]
+   #[case::surrounding_spaces("  Hello  ", Some("Hello".to_string()))]
+   #[case::only_nulls("\0\0\0", None)]
+   #[case::only_spaces("   ", None)]
+   #[case::empty("", None)]
+   fn test_trim_null_and_whitespace(#[case] input: &str, #[case] expected: Option<String>) {
+      assert_eq!(trim_null_and_whitespace(input), expected);
    }
 
-   #[test]
-   fn test_decode_text_dispatch() {
-      assert_eq!(
-         decode_text(b"Hello", TextEncoding::Latin1),
-         Some("Hello".to_string())
-      );
-      assert_eq!(
-         decode_text(b"Hello", TextEncoding::Utf8),
-         Some("Hello".to_string())
-      );
+   #[rstest]
+   #[case::latin1(TextEncoding::Latin1)]
+   #[case::utf8(TextEncoding::Utf8)]
+   fn test_decode_text_dispatch(#[case] encoding: TextEncoding) {
+      assert_eq!(decode_text(b"Hello", encoding), Some("Hello".to_string()));
    }
 }

@@ -43,14 +43,16 @@ impl Mp4Box {
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
 
-   #[test]
-   fn test_mp4_box_bytes() {
-      assert_eq!(Mp4Box::Moov.bytes(), *b"moov");
-      assert_eq!(Mp4Box::Mvhd.bytes(), *b"mvhd");
-      assert_eq!(Mp4Box::Udta.bytes(), *b"udta");
-      assert_eq!(Mp4Box::Meta.bytes(), *b"meta");
-      assert_eq!(Mp4Box::Ilst.bytes(), *b"ilst");
-      assert_eq!(Mp4Box::Data.bytes(), *b"data");
+   #[rstest]
+   #[case::moov(Mp4Box::Moov, *b"moov")]
+   #[case::mvhd(Mp4Box::Mvhd, *b"mvhd")]
+   #[case::udta(Mp4Box::Udta, *b"udta")]
+   #[case::meta(Mp4Box::Meta, *b"meta")]
+   #[case::ilst(Mp4Box::Ilst, *b"ilst")]
+   #[case::data(Mp4Box::Data, *b"data")]
+   fn test_mp4_box_bytes(#[case] mp4_box: Mp4Box, #[case] expected: [u8; 4]) {
+      assert_eq!(mp4_box.bytes(), expected);
    }
 }

@@ -359,6 +359,7 @@ fn append_annex_b_nal(output: &mut Vec<u8>, nal: &[u8]) -> Result<(), DecodeErro
 mod tests {
    use super::*;
    use crate::decoders::h264::{AvcColorMetadata, AvcConfig, DecodeError};
+   use rstest::rstest;
 
    #[test]
    fn rewrites_length_prefixed_samples_and_reuses_the_output() {
@@ -396,20 +397,19 @@ mod tests {
    /// The pre-flight size and the real rewrite have to agree to the byte:
    /// `max_input_size` is derived from the former, and Android sizes its input
    /// buffer from that, so any drift shows up only at decode time on-device.
-   #[test]
-   fn the_size_preflight_matches_the_rewritten_sample_exactly() {
-      let samples: [(&[u8], usize); 4] = [
-         (&[0, 0, 0, 2, 0x65, 0x88, 0, 0, 0, 1, 0x41], 4),
-         (&[0, 0, 0, 1, 0x06], 4),
-         (&[0, 0, 0, 3, 0x67, 0x42, 0x1e], 4),
-         (&[2, 0x65, 0x88, 1, 0x41], 1),
-      ];
+   #[rstest]
+   #[case::idr_and_non_idr_slices(&[0, 0, 0, 2, 0x65, 0x88, 0, 0, 0, 1, 0x41], 4)]
+   #[case::sei_only(&[0, 0, 0, 1, 0x06], 4)]
+   #[case::sps_only(&[0, 0, 0, 3, 0x67, 0x42, 0x1e], 4)]
+   #[case::one_byte_lengths(&[2, 0x65, 0x88, 1, 0x41], 1)]
+   fn the_size_preflight_matches_the_rewritten_sample_exactly(
+      #[case] sample: &[u8],
+      #[case] length_size: usize,
+   ) {
       let mut output = Vec::new();
 
-      for (sample, length_size) in samples {
-         sample_to_annex_b(sample, length_size, &mut output).expect("valid AVC sample");
-         assert_eq!(annex_b_sample_len(sample, length_size), Ok(output.len()));
-      }
+      sample_to_annex_b(sample, length_size, &mut output).expect("valid AVC sample");
+      assert_eq!(annex_b_sample_len(sample, length_size), Ok(output.len()));
    }
 
    #[test]
@@ -433,61 +433,50 @@ mod tests {
       assert_eq!(config.max_input_size, None);
    }
 
-   #[test]
-   fn rejects_empty_nals_as_bitstream_errors() {
+   #[rstest]
+   #[case::empty_sample(&[])]
+   #[case::zero_length_nal(&[0, 0, 0, 0])]
+   fn rejects_empty_nals_as_bitstream_errors(#[case] sample: &[u8]) {
       let mut output = vec![0xff; 8];
 
       assert!(matches!(
-         sample_to_annex_b(&[], 4, &mut output),
+         sample_to_annex_b(sample, 4, &mut output),
          Err(DecodeError::Bitstream(_))
       ));
       assert!(output.is_empty());
-
-      assert!(matches!(
-         sample_to_annex_b(&[0, 0, 0, 0], 4, &mut output),
-         Err(DecodeError::Bitstream(_))
-      ));
    }
 
-   #[test]
-   fn serializes_parameter_sets_and_allows_empty_avc3_configuration() {
-      let config = AvcConfig {
-         length_size: 4,
-         sps: vec![vec![0x67, 0x42]],
-         pps: vec![vec![0x68, 0xce]],
-         color: AvcColorMetadata::default(),
-         display_width: 2,
-         display_height: 2,
-         max_input_size: None,
-         resolved_full_range: None,
-         resolved_codec_dimensions: None,
-      };
+   #[rstest]
+   #[case::sps_and_pps(
+      vec![vec![0x67, 0x42]],
+      vec![vec![0x68, 0xce]],
+      vec![0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x68, 0xce],
+   )]
+   #[case::empty_avc3(Vec::new(), Vec::new(), Vec::new())]
+   fn serializes_parameter_sets_to_annex_b(
+      #[case] sps: Vec<Vec<u8>>,
+      #[case] pps: Vec<Vec<u8>>,
+      #[case] expected: Vec<u8>,
+   ) {
+      let config = parameter_config(4, sps, pps);
+
       assert_eq!(
          parameter_sets_annex_b(&config).expect("valid parameter sets"),
-         [0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x68, 0xce]
+         expected
       );
-
-      let avc3 = AvcConfig {
-         length_size: 4,
-         sps: Vec::new(),
-         pps: Vec::new(),
-         color: AvcColorMetadata::default(),
-         display_width: 2,
-         display_height: 2,
-         max_input_size: None,
-         resolved_full_range: None,
-         resolved_codec_dimensions: None,
-      };
-      assert_eq!(parameter_sets_annex_b(&avc3), Ok(Vec::new()));
    }
 
-   #[test]
-   fn serializes_parameter_set_groups_for_separate_csd_buffers() {
-      assert_eq!(
-         nals_annex_b(&[vec![0x67, 0x42], vec![0x67, 0x64]]),
-         Ok(vec![0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x67, 0x64,])
-      );
-      assert_eq!(nals_annex_b(&[]), Ok(Vec::new()));
+   #[rstest]
+   #[case::two_sps(
+      vec![vec![0x67, 0x42], vec![0x67, 0x64]],
+      vec![0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x67, 0x64],
+   )]
+   #[case::empty_group(Vec::new(), Vec::new())]
+   fn serializes_parameter_set_groups_for_separate_csd_buffers(
+      #[case] nals: Vec<Vec<u8>>,
+      #[case] expected: Vec<u8>,
+   ) {
+      assert_eq!(nals_annex_b(&nals), Ok(expected));
    }
 
    fn avcc_sample(length_size: usize, nals: &[&[u8]]) -> Vec<u8> {
@@ -559,30 +548,31 @@ mod tests {
       assert!(matches!(error, DecodeError::Bitstream(_)));
    }
 
-   #[test]
-   fn reserved_annex_b_stays_exact_and_stable_for_all_length_sizes() {
-      for length_size in 1..=4 {
-         let sample = avcc_sample(length_size, &[&[0x67, 0x42], &[0x65, 0x88, 0x99]]);
-         let config = parameter_config(length_size, Vec::new(), Vec::new());
-         let mut sps_visits = 0;
-         let prepared = max_input_size_and_sps(&config, std::slice::from_ref(&sample), |_| {
-            sps_visits += 1;
-            Ok(())
-         })
-         .expect("valid fused preflight");
-         let expected = annex_b_sample_len(&sample, length_size).expect("valid size");
-         assert_eq!(prepared, expected);
-         assert_eq!(sps_visits, 1);
+   #[rstest]
+   #[case::one_byte(1)]
+   #[case::two_byte(2)]
+   #[case::three_byte(3)]
+   #[case::four_byte(4)]
+   fn reserved_annex_b_stays_exact_and_stable_for_all_length_sizes(#[case] length_size: usize) {
+      let sample = avcc_sample(length_size, &[&[0x67, 0x42], &[0x65, 0x88, 0x99]]);
+      let config = parameter_config(length_size, Vec::new(), Vec::new());
+      let mut sps_visits = 0;
+      let prepared = max_input_size_and_sps(&config, std::slice::from_ref(&sample), |_| {
+         sps_visits += 1;
+         Ok(())
+      })
+      .expect("valid fused preflight");
+      let expected = annex_b_sample_len(&sample, length_size).expect("valid size");
+      assert_eq!(prepared, expected);
+      assert_eq!(sps_visits, 1);
 
-         let mut output = Vec::new();
-         output.try_reserve_exact(expected).expect("test allocation");
-         let capacity = output.capacity();
-         sample_to_annex_b_into_reserved(&sample, length_size, &mut output)
-            .expect("reserved rewrite");
+      let mut output = Vec::new();
+      output.try_reserve_exact(expected).expect("test allocation");
+      let capacity = output.capacity();
+      sample_to_annex_b_into_reserved(&sample, length_size, &mut output).expect("reserved rewrite");
 
-         assert_eq!(output.len(), expected);
-         assert_eq!(output.capacity(), capacity);
-      }
+      assert_eq!(output.len(), expected);
+      assert_eq!(output.capacity(), capacity);
    }
 
    #[test]
@@ -623,23 +613,14 @@ mod tests {
       assert_eq!(sets.pps, [vec![0x68, 0xce]]);
    }
 
-   #[test]
-   fn completes_parameter_sets_for_core_media_supported_avcc_length_widths() {
-      for length_size in [1, 2, 4] {
-         let config = parameter_config(length_size, vec![], vec![vec![0x68, 0xce]]);
-         let sample = avcc_sample(length_size, &[&[0x67, 0x42], &[0x68, 0xce]]);
-
-         let sets = collect_avc_parameter_sets(&config, &sample).expect("complete parameter sets");
-
-         assert_eq!(sets.sps, [vec![0x67, 0x42]]);
-         assert_eq!(sets.pps, [vec![0x68, 0xce]]);
-      }
-   }
-
-   #[test]
-   fn collector_visitor_accepts_three_byte_avcc_length_fields() {
-      let config = parameter_config(3, vec![], vec![vec![0x68, 0xce]]);
-      let sample = avcc_sample(3, &[&[0x67, 0x42], &[0x68, 0xce]]);
+   #[rstest]
+   #[case::core_media_one_byte(1)]
+   #[case::core_media_two_byte(2)]
+   #[case::core_media_four_byte(4)]
+   #[case::collector_visitor_three_byte(3)]
+   fn completes_parameter_sets_for_every_avcc_length_width(#[case] length_size: usize) {
+      let config = parameter_config(length_size, vec![], vec![vec![0x68, 0xce]]);
+      let sample = avcc_sample(length_size, &[&[0x67, 0x42], &[0x68, 0xce]]);
 
       let sets = collect_avc_parameter_sets(&config, &sample).expect("complete parameter sets");
 
@@ -666,68 +647,71 @@ mod tests {
       assert_eq!(output.capacity(), capacity);
    }
 
-   #[test]
-   fn rejects_truncated_three_byte_avcc_samples() {
+   #[rstest]
+   #[case::truncated_payload(&[0, 0, 3, 0x65, 0x88])]
+   #[case::truncated_length_field(&[0, 0, 1, 0x41, 0, 0])]
+   fn rejects_truncated_three_byte_avcc_samples(#[case] truncated: &[u8]) {
       let mut output = vec![0xff; 8];
 
-      for truncated in [&[0, 0, 3, 0x65, 0x88][..], &[0, 0, 1, 0x41, 0, 0][..]] {
-         assert!(matches!(
-            avcc3_sample_to_avcc4(truncated, &mut output),
-            Err(DecodeError::Bitstream(message)) if message.contains("truncated")
-         ));
-      }
-   }
-
-   #[test]
-   fn rejects_missing_empty_and_truncated_in_band_parameter_sets() {
-      let missing_pps = parameter_config(1, vec![], vec![]);
-      let sps_only = avcc_sample(1, &[&[0x67, 0x42]]);
       assert!(matches!(
-         collect_avc_parameter_sets(&missing_pps, &sps_only),
-         Err(DecodeError::Bitstream(message)) if message.contains("SPS and PPS")
-      ));
-
-      assert!(matches!(
-         collect_avc_parameter_sets(&missing_pps, &[]),
-         Err(DecodeError::Bitstream(message)) if message.contains("no NAL")
-      ));
-      assert!(matches!(
-         collect_avc_parameter_sets(&missing_pps, &[2, 0x67]),
+         avcc3_sample_to_avcc4(truncated, &mut output),
          Err(DecodeError::Bitstream(message)) if message.contains("truncated")
       ));
    }
 
-   #[test]
-   fn rejects_unique_parameter_sets_above_each_count_limit() {
-      let sps_at_limit = (0u8..32).map(|id| vec![0x67, id]).collect();
-      let sps_config = parameter_config(2, sps_at_limit, vec![vec![0x68, 0]]);
-      let extra_sps = avcc_sample(2, &[&[0x67, 32]]);
+   #[rstest]
+   #[case::missing_pps(avcc_sample(1, &[&[0x67, 0x42]]), "SPS and PPS")]
+   #[case::empty_sample(Vec::new(), "no NAL")]
+   #[case::truncated_sample(vec![2, 0x67], "truncated")]
+   fn rejects_missing_empty_and_truncated_in_band_parameter_sets(
+      #[case] sample: Vec<u8>,
+      #[case] expected: &str,
+   ) {
+      let missing_pps = parameter_config(1, vec![], vec![]);
       assert!(matches!(
-         collect_avc_parameter_sets(&sps_config, &extra_sps),
-         Err(DecodeError::ResourceLimit(message)) if message.contains("SPS")
-      ));
-
-      let pps_at_limit = (0u16..256)
-         .map(|id| vec![0x68, (id >> 8) as u8, id as u8])
-         .collect();
-      let pps_config = parameter_config(2, vec![vec![0x67, 0]], pps_at_limit);
-      let extra_pps = avcc_sample(2, &[&[0x68, 1, 0]]);
-      assert!(matches!(
-         collect_avc_parameter_sets(&pps_config, &extra_pps),
-         Err(DecodeError::ResourceLimit(message)) if message.contains("PPS")
+         collect_avc_parameter_sets(&missing_pps, &sample),
+         Err(DecodeError::Bitstream(message)) if message.contains(expected)
       ));
    }
 
-   #[test]
-   fn rejects_unique_parameter_sets_above_the_total_byte_limit() {
-      const LIMIT: usize = MAX_AVC_PARAMETER_SET_BYTES;
-
-      let config = parameter_config(4, vec![vec![0x67; LIMIT - 2]], vec![vec![0x68]]);
-      let extra_sps = avcc_sample(4, &[&[0x67, 0x42]]);
-
+   #[rstest]
+   #[case::extra_sps_above_count_limit(
+      parameter_config(
+         2,
+         (0u8..32).map(|id| vec![0x67, id]).collect(),
+         vec![vec![0x68, 0]],
+      ),
+      avcc_sample(2, &[&[0x67, 32]]),
+      "SPS",
+   )]
+   #[case::extra_pps_above_count_limit(
+      parameter_config(
+         2,
+         vec![vec![0x67, 0]],
+         (0u16..256)
+            .map(|id| vec![0x68, (id >> 8) as u8, id as u8])
+            .collect(),
+      ),
+      avcc_sample(2, &[&[0x68, 1, 0]]),
+      "PPS",
+   )]
+   #[case::extra_sps_above_total_byte_limit(
+      parameter_config(
+         4,
+         vec![vec![0x67; MAX_AVC_PARAMETER_SET_BYTES - 2]],
+         vec![vec![0x68]],
+      ),
+      avcc_sample(4, &[&[0x67, 0x42]]),
+      "bytes",
+   )]
+   fn rejects_unique_parameter_sets_above_each_limit(
+      #[case] config: AvcConfig,
+      #[case] extra: Vec<u8>,
+      #[case] limit: &str,
+   ) {
       assert!(matches!(
-         collect_avc_parameter_sets(&config, &extra_sps),
-         Err(DecodeError::ResourceLimit(message)) if message.contains("bytes")
+         collect_avc_parameter_sets(&config, &extra),
+         Err(DecodeError::ResourceLimit(message)) if message.contains(limit)
       ));
    }
 

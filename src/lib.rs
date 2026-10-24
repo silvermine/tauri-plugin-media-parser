@@ -185,10 +185,25 @@ impl Builder {
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
    use tauri::test::{mock_builder, mock_context, noop_assets};
 
-   #[test]
-   fn plugin_setup_registers_configured_default_headers() {
+   #[rstest]
+   #[case::configured_origin(
+      "https://example.com/file",
+      source::MergedHeaders {
+         headers: Some(HashMap::from([
+            ("user-agent".into(), "app/1.0".into()),
+            ("authorization".into(), "Bearer test".into()),
+         ])),
+         force_same_origin: true,
+      },
+   )]
+   #[case::other_origin("https://other.example/file", source::MergedHeaders::default())]
+   fn plugin_setup_registers_configured_default_headers(
+      #[case] url: &str,
+      #[case] expected: source::MergedHeaders,
+   ) {
       let app = mock_builder()
          .plugin(
             Builder::new()
@@ -201,20 +216,7 @@ mod tests {
          .expect("valid defaults should allow plugin initialization");
 
       let defaults: tauri::State<'_, source::DefaultHeaders> = app.state();
-      assert_eq!(
-         defaults.merge("https://example.com/file", None).unwrap(),
-         source::MergedHeaders {
-            headers: Some(HashMap::from([
-               ("user-agent".into(), "app/1.0".into()),
-               ("authorization".into(), "Bearer test".into()),
-            ])),
-            force_same_origin: true,
-         }
-      );
-      assert_eq!(
-         defaults.merge("https://other.example/file", None).unwrap(),
-         source::MergedHeaders::default()
-      );
+      assert_eq!(defaults.merge(url, None).unwrap(), expected);
    }
 
    #[test]
@@ -233,8 +235,14 @@ mod tests {
       }
    }
 
-   #[test]
-   fn default_header_origins_accumulate_and_limit_where_defaults_are_sent() {
+   #[rstest]
+   #[case::first_origin("https://first.example/file", true)]
+   #[case::second_origin("https://second.example/file", true)]
+   #[case::unlisted_origin("https://third.example/file", false)]
+   fn default_header_origins_accumulate_and_limit_where_defaults_are_sent(
+      #[case] source: &str,
+      #[case] sends_defaults: bool,
+   ) {
       let defaults = Builder::new()
          .user_agent("app/1.0")
          .default_headers_origins(Vec::<String>::new())
@@ -242,19 +250,9 @@ mod tests {
          .default_headers_origins(["https://second.example"])
          .into_default_headers()
          .unwrap();
-      for source in ["https://first.example/file", "https://second.example/file"] {
-         assert_eq!(
-            defaults.merge(source, None).unwrap().headers,
-            Some(HashMap::from([("user-agent".into(), "app/1.0".into())]))
-         );
-      }
-      assert_eq!(
-         defaults
-            .merge("https://third.example/file", None)
-            .unwrap()
-            .headers,
-         None
-      );
+      let expected =
+         sends_defaults.then(|| HashMap::from([("user-agent".into(), "app/1.0".into())]));
+      assert_eq!(defaults.merge(source, None).unwrap().headers, expected);
    }
 
    #[test]
@@ -274,18 +272,15 @@ mod tests {
       );
    }
 
-   #[test]
-   fn invalid_http_defaults_fail_default_header_composition() {
-      for builder in [
-         Builder::new().user_agent("a\nb"),
-         Builder::new().default_headers([("invalid header", "value")]),
-         Builder::new().default_headers([("X-Test", "a\nb")]),
-      ] {
-         assert!(matches!(
-            builder.into_default_headers(),
-            Err(Error::Custom(_))
-         ));
-      }
+   #[rstest]
+   #[case::invalid_user_agent_value(Builder::new().user_agent("a\nb"))]
+   #[case::invalid_header_name(Builder::new().default_headers([("invalid header", "value")]))]
+   #[case::invalid_header_value(Builder::new().default_headers([("X-Test", "a\nb")]))]
+   fn invalid_http_defaults_fail_default_header_composition(#[case] builder: Builder) {
+      assert!(matches!(
+         builder.into_default_headers(),
+         Err(Error::Custom(_))
+      ));
    }
 
    #[test]
@@ -298,25 +293,26 @@ mod tests {
       assert_eq!(headers, HashMap::from([("x-test".into(), "second".into())]));
    }
 
-   #[test]
-   fn user_agent_overrides_default_header_in_either_setter_order() {
-      for builder in [
-         Builder::new()
-            .user_agent("my-app/1.0")
-            .default_headers([("User-Agent", "other/1.0")]),
-         Builder::new()
-            .default_headers([("User-Agent", "other/1.0")])
-            .user_agent("my-app/1.0"),
-      ] {
-         assert_eq!(
-            builder
-               .into_default_headers()
-               .unwrap()
-               .merge("https://example.com/file", None)
-               .unwrap()
-               .headers,
-            Some(HashMap::from([("user-agent".into(), "my-app/1.0".into())])),
-         );
-      }
+   #[rstest]
+   #[case::user_agent_set_first(
+      Builder::new()
+         .user_agent("my-app/1.0")
+         .default_headers([("User-Agent", "other/1.0")]),
+   )]
+   #[case::user_agent_set_last(
+      Builder::new()
+         .default_headers([("User-Agent", "other/1.0")])
+         .user_agent("my-app/1.0"),
+   )]
+   fn user_agent_overrides_default_header_in_either_setter_order(#[case] builder: Builder) {
+      assert_eq!(
+         builder
+            .into_default_headers()
+            .unwrap()
+            .merge("https://example.com/file", None)
+            .unwrap()
+            .headers,
+         Some(HashMap::from([("user-agent".into(), "my-app/1.0".into())])),
+      );
    }
 }

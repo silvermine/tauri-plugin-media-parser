@@ -559,6 +559,7 @@ pub fn ticks_to_duration(ticks: u64, timescale: u32) -> Duration {
 mod tests {
    use super::*;
    use crate::format::mp4::atoms::budget::RetainedBudget;
+   use rstest::rstest;
 
    fn stts_entries(entries: &[(u32, u32)]) -> Vec<u8> {
       let mut bytes = vec![0; 8];
@@ -622,12 +623,14 @@ mod tests {
       );
    }
 
-   #[test]
-   fn compact_timing_rejects_aggregate_sample_count_overflow() {
+   #[rstest]
+   #[case::aggregate_sample_count_overflow(stts_entries(&[(u32::MAX, 1), (1, 1)]))]
+   #[case::malformed_input(vec![0, 0, 0, 0, 0, 0, 0, 1])]
+   fn compact_timing_reports_malformed_tables_as_invalid(#[case] stts: Vec<u8>) {
       let mut budget = RetainedBudget::new(usize::MAX);
 
       assert!(matches!(
-         SampleTimingTable::parse(&stts_entries(&[(u32::MAX, 1), (1, 1)]), &mut budget),
+         SampleTimingTable::parse(&stts, &mut budget),
          Err(TableParseError::Invalid(_))
       ));
    }
@@ -646,17 +649,6 @@ mod tests {
          Err(TableParseError::BudgetExceeded)
       ));
       assert_eq!(budget.used_bytes(), first_charge);
-   }
-
-   #[test]
-   fn compact_timing_distinguishes_malformed_input_from_budget_failure() {
-      let mut budget = RetainedBudget::new(usize::MAX);
-      let malformed = [0, 0, 0, 0, 0, 0, 0, 1];
-
-      assert!(matches!(
-         SampleTimingTable::parse(&malformed, &mut budget),
-         Err(TableParseError::Invalid(_))
-      ));
    }
 
    #[test]
@@ -703,25 +695,26 @@ mod tests {
       );
    }
 
-   #[test]
-   fn accepts_empty_edit_and_rejects_multi_segment_edit_lists() {
-      let empty_edit = elst_payload(&[(1_000, -1)]);
-      let multiple_edits = elst_payload(&[(1_000, 0), (1_000, 1_000)]);
-
-      assert_eq!(parse_elst_media_time(&empty_edit), Some(0));
-      assert_eq!(parse_elst_media_time(&multiple_edits), None);
+   #[rstest]
+   #[case::empty_edit(&[(1_000, -1)], Some(0))]
+   #[case::multiple_edits(&[(1_000, 0), (1_000, 1_000)], None)]
+   fn reads_edit_list_media_time_only_from_single_segment_lists(
+      #[case] segments: &[(u32, i32)],
+      #[case] media_time: Option<i64>,
+   ) {
+      assert_eq!(parse_elst_media_time(&elst_payload(segments)), media_time);
    }
 
-   #[test]
-   fn falls_back_to_no_presentation_offset_for_unmodeled_edit_lists() {
-      let single_segment = trak_with_edit_list(&[(1_000, 512)]);
-      let several_segments = trak_with_edit_list(&[(1_000, 0), (1_000, 1_000)]);
-      let malformed = mp4_box(b"edts", &mp4_box(b"elst", &[0, 0]));
-
-      assert_eq!(track_presentation_offset(&single_segment), 512);
-      assert_eq!(track_presentation_offset(&several_segments), 0);
-      assert_eq!(track_presentation_offset(&malformed), 0);
-      assert_eq!(track_presentation_offset(&[]), 0);
+   #[rstest]
+   #[case::single_segment(trak_with_edit_list(&[(1_000, 512)]), 512)]
+   #[case::several_segments(trak_with_edit_list(&[(1_000, 0), (1_000, 1_000)]), 0)]
+   #[case::malformed(mp4_box(b"edts", &mp4_box(b"elst", &[0, 0])), 0)]
+   #[case::no_edit_list(Vec::new(), 0)]
+   fn track_presentation_offset_is_single_segment_media_time_or_zero(
+      #[case] trak: Vec<u8>,
+      #[case] presentation_offset: i64,
+   ) {
+      assert_eq!(track_presentation_offset(&trak), presentation_offset);
    }
 
    #[test]
@@ -776,8 +769,19 @@ mod tests {
       );
    }
 
-   #[test]
-   fn presentation_timeline_handles_reordered_and_equal_ticks() {
+   #[rstest]
+   #[case::at_first_tick(0, 2, 0)]
+   #[case::after_first_tick(500, 2, 0)]
+   #[case::at_reordered_tick(1_000, 1, 1_000)]
+   #[case::after_reordered_tick(1_500, 1, 1_000)]
+   #[case::at_equal_ticks(2_000, 5, 2_000)]
+   #[case::after_equal_ticks(2_500, 5, 2_000)]
+   #[case::far_past_last_tick(10_000, 5, 2_000)]
+   fn presentation_timeline_handles_reordered_and_equal_ticks(
+      #[case] target: u64,
+      #[case] sample_index: u32,
+      #[case] presentation_tick: u64,
+   ) {
       let composition_offsets = vec![
          CompositionOffset {
             sample_count: 1,
@@ -803,25 +807,18 @@ mod tests {
       let timeline =
          PresentationTimeline::new(&stts(5, 1_000), Some(&composition_offsets), 1_000, 5).unwrap();
 
-      for (target, sample_index, presentation_tick) in [
-         (0, 2, 0),
-         (500, 2, 0),
-         (1_000, 1, 1_000),
-         (1_500, 1, 1_000),
-         (2_000, 5, 2_000),
-         (2_500, 5, 2_000),
-         (10_000, 5, 2_000),
-      ] {
-         assert_eq!(
-            timeline.select(target),
-            Some(SampleSelection {
-               sample_index,
-               presentation_tick,
-            }),
-            "target {target}"
-         );
-      }
+      assert_eq!(
+         timeline.select(target),
+         Some(SampleSelection {
+            sample_index,
+            presentation_tick,
+         }),
+         "target {target}"
+      );
+   }
 
+   #[test]
+   fn presentation_timeline_shifts_ticks_later_for_negative_offset() {
       let shifted = PresentationTimeline::new(&stts(5, 1_000), None, -1_000, 5).unwrap();
       assert_eq!(
          shifted.select(0),
@@ -832,89 +829,97 @@ mod tests {
       );
    }
 
-   #[test]
-   fn presentation_timeline_preserves_signed_ticks_in_decode_order_ranges() {
+   #[rstest]
+   #[case::whole_track(1, 3, Some(vec![(1, -1_500), (2, -500), (3, 500)]))]
+   #[case::zero_start_sample(0, 1, None)]
+   #[case::reversed_range(2, 1, None)]
+   #[case::past_last_sample(1, 4, None)]
+   fn presentation_timeline_returns_signed_ticks_only_for_valid_decode_order_ranges(
+      #[case] start_sample: u32,
+      #[case] end_sample: u32,
+      #[case] ticks: Option<Vec<(u32, i128)>>,
+   ) {
       let timeline = PresentationTimeline::new(&stts(3, 1_000), None, 1_500, 3).unwrap();
 
-      assert_eq!(
-         timeline.ticks_for_range(1, 3),
-         Some(vec![(1, -1_500), (2, -500), (3, 500)])
-      );
+      assert_eq!(timeline.ticks_for_range(start_sample, end_sample), ticks);
+   }
+
+   #[test]
+   fn presentation_timeline_preserves_signed_tick_of_a_single_sample() {
+      let timeline = PresentationTimeline::new(&stts(3, 1_000), None, 1_500, 3).unwrap();
+
       assert_eq!(timeline.tick(2), Some(-500));
-      assert_eq!(timeline.ticks_for_range(0, 1), None);
-      assert_eq!(timeline.ticks_for_range(2, 1), None);
-      assert_eq!(timeline.ticks_for_range(1, 4), None);
+   }
+
+   #[rstest]
+   #[case::zero_sample_count(stts(0, 1), None, 1)]
+   #[case::empty_stts_without_samples(Vec::new(), None, 0)]
+   #[case::empty_stts_with_one_sample(Vec::new(), None, 1)]
+   #[case::zero_sample_delta(stts(1, 0), None, 1)]
+   #[case::ctts_shorter_than_stts(
+      stts(2, 1),
+      Some(vec![CompositionOffset {
+         sample_count: 1,
+         sample_offset: 0,
+      }]),
+      2,
+   )]
+   #[case::ctts_longer_than_stts(
+      stts(1, 1),
+      Some(vec![CompositionOffset {
+         sample_count: 2,
+         sample_offset: 0,
+      }]),
+      1,
+   )]
+   #[case::sample_count_beyond_stts(stts(1, 1), None, 2)]
+   #[case::max_samples_over_storage_budget(stts(u32::MAX, u32::MAX), None, u32::MAX)]
+   #[case::zero_sample_delta_over_two_samples(stts(2, 0), None, 2)]
+   fn presentation_timeline_rejects_malformed_timing_tables(
+      #[case] stts_table: Vec<u8>,
+      #[case] composition_offsets: Option<Vec<CompositionOffset>>,
+      #[case] sample_count: u32,
+   ) {
+      let timeline =
+         PresentationTimeline::new(&stts_table, composition_offsets.as_deref(), 0, sample_count);
+
+      assert!(timeline.is_none());
    }
 
    #[test]
-   fn presentation_timeline_rejects_malformed_timing_tables() {
-      assert!(PresentationTimeline::new(&stts(0, 1), None, 0, 1).is_none());
-      assert!(PresentationTimeline::new(&[], None, 0, 0).is_none());
-      assert!(PresentationTimeline::new(&[], None, 0, 1).is_none());
-      assert!(PresentationTimeline::new(&stts(1, 0), None, 0, 1).is_none());
-      assert!(
-         PresentationTimeline::new(
-            &stts(2, 1),
-            Some(&[CompositionOffset {
-               sample_count: 1,
-               sample_offset: 0,
-            }]),
-            0,
-            2,
-         )
-         .is_none()
-      );
-      assert!(
-         PresentationTimeline::new(
-            &stts(1, 1),
-            Some(&[CompositionOffset {
-               sample_count: 2,
-               sample_offset: 0,
-            }]),
-            0,
-            1,
-         )
-         .is_none()
-      );
-      assert!(PresentationTimeline::new(&stts(1, 1), None, 0, 2).is_none());
+   fn presentation_timeline_accepts_max_sample_delta() {
       assert!(PresentationTimeline::new(&stts(2, u32::MAX), None, 0, 2).is_some());
-      assert!(PresentationTimeline::new(&stts(u32::MAX, u32::MAX), None, 0, u32::MAX).is_none());
    }
 
-   #[test]
-   fn presentation_timeline_pins_the_storage_budget_boundary() {
+   fn max_presentation_timeline_samples() -> usize {
       let bytes_per_sample = std::mem::size_of::<i128>() + std::mem::size_of::<u32>();
-      let max_samples = MAX_PRESENTATION_TIMELINE_BYTES / bytes_per_sample;
-
-      assert!(!presentation_timeline_sample_count_fits(0));
-      assert!(presentation_timeline_sample_count_fits(max_samples));
-      assert!(!presentation_timeline_sample_count_fits(max_samples + 1));
+      MAX_PRESENTATION_TIMELINE_BYTES / bytes_per_sample
    }
 
-   #[test]
-   fn presentation_timeline_still_rejects_zero_sample_delta() {
-      assert!(PresentationTimeline::new(&stts(2, 0), None, 0, 2).is_none());
+   #[rstest]
+   #[case::no_samples(0, false)]
+   #[case::max_samples(max_presentation_timeline_samples(), true)]
+   #[case::one_past_max_samples(max_presentation_timeline_samples() + 1, false)]
+   fn presentation_timeline_pins_the_storage_budget_boundary(
+      #[case] sample_count: usize,
+      #[case] fits: bool,
+   ) {
+      assert_eq!(presentation_timeline_sample_count_fits(sample_count), fits);
    }
 
-   #[test]
-   fn sums_stts_duration_with_checked_arithmetic() {
-      let mut bytes = vec![0; 8];
-      bytes[4..8].copy_from_slice(&2u32.to_be_bytes());
-      bytes.extend_from_slice(&3u32.to_be_bytes());
-      bytes.extend_from_slice(&1_000u32.to_be_bytes());
-      bytes.extend_from_slice(&2u32.to_be_bytes());
-      bytes.extend_from_slice(&500u32.to_be_bytes());
-
-      assert_eq!(stts_duration_ticks(&bytes), Some(4_000));
-
-      let mut large = vec![0; 8];
-      large[4..8].copy_from_slice(&1u32.to_be_bytes());
-      large.extend_from_slice(&u32::MAX.to_be_bytes());
-      large.extend_from_slice(&u32::MAX.to_be_bytes());
-
+   #[rstest]
+   #[case::two_runs(&[(3, 1_000), (2, 500)], 4_000)]
+   #[case::max_count_and_delta(
+      &[(u32::MAX, u32::MAX)],
+      u64::from(u32::MAX) * u64::from(u32::MAX)
+   )]
+   fn sums_stts_duration_with_checked_arithmetic(
+      #[case] entries: &[(u32, u32)],
+      #[case] duration_ticks: u64,
+   ) {
       assert_eq!(
-         stts_duration_ticks(&large),
-         Some(u64::from(u32::MAX) * u64::from(u32::MAX))
+         stts_duration_ticks(&stts_entries(entries)),
+         Some(duration_ticks)
       );
    }
 

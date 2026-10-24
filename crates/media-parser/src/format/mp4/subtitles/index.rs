@@ -993,6 +993,7 @@ mod tests {
    use super::*;
    use crate::format::mp4::atoms::RetainedBudget;
    use async_trait::async_trait;
+   use rstest::rstest;
 
    struct BytesReader(Vec<u8>);
 
@@ -1254,26 +1255,25 @@ mod tests {
       reason
    }
 
+   #[rstest]
+   #[case::disabled_target_is_excluded(true, 1, false, vec![])]
+   #[case::enabled_target_remains_a_subtitle_track(true, 1, true, vec![1])]
+   #[case::disabled_source_does_not_classify_its_target(false, 1, false, vec![1])]
+   #[case::zero_reference_id_is_ignored(true, 0, false, vec![0])]
    #[tokio::test]
-   async fn enabled_chapter_source_excludes_only_a_disabled_target() {
-      let source = chapter_source_track(10, true, &chapter_reference(&[1]));
-      let target = index_track_with_enabled(1, 1, b"text", false);
+   async fn chapter_reference_excludes_a_disabled_target_only_when_an_enabled_source_names_it(
+      #[case] source_enabled: bool,
+      #[case] target_id: u32,
+      #[case] target_enabled: bool,
+      #[case] expected_ready: Vec<u32>,
+   ) {
+      let source = chapter_source_track(10, source_enabled, &chapter_reference(&[target_id]));
+      let target = index_track_with_enabled(target_id, 1, b"text", target_enabled);
       let index = SubtitleIndex::read(&index_fixture(&[source, target]))
          .await
          .unwrap();
 
-      assert!(ready_track_ids(&index).is_empty());
-   }
-
-   #[tokio::test]
-   async fn enabled_chapter_target_remains_a_subtitle_track() {
-      let source = chapter_source_track(10, true, &chapter_reference(&[1]));
-      let target = index_track_with_enabled(1, 1, b"text", true);
-      let index = SubtitleIndex::read(&index_fixture(&[source, target]))
-         .await
-         .unwrap();
-
-      assert_eq!(ready_track_ids(&index), vec![1]);
+      assert_eq!(ready_track_ids(&index), expected_ready);
    }
 
    #[tokio::test]
@@ -1294,28 +1294,6 @@ mod tests {
          })
          .collect::<Vec<_>>();
       assert_eq!(ready, vec![(1, "tx3g".to_owned())]);
-   }
-
-   #[tokio::test]
-   async fn disabled_chapter_source_does_not_classify_its_target() {
-      let source = chapter_source_track(10, false, &chapter_reference(&[1]));
-      let target = index_track_with_enabled(1, 1, b"text", false);
-      let index = SubtitleIndex::read(&index_fixture(&[source, target]))
-         .await
-         .unwrap();
-
-      assert_eq!(ready_track_ids(&index), vec![1]);
-   }
-
-   #[tokio::test]
-   async fn zero_chapter_reference_id_is_ignored() {
-      let source = chapter_source_track(10, true, &chapter_reference(&[0]));
-      let target = index_track_with_enabled(0, 1, b"text", false);
-      let index = SubtitleIndex::read(&index_fixture(&[source, target]))
-         .await
-         .unwrap();
-
-      assert_eq!(ready_track_ids(&index), vec![0]);
    }
 
    #[tokio::test]
@@ -1474,8 +1452,15 @@ mod tests {
       });
    }
 
-   #[tokio::test]
-   async fn local_decode_error_returns_all_cumulative_budgets_without_refund() {
+   const LOCAL_DECODE_ERROR_BASELINE: RequestLimits = RequestLimits {
+      max_samples: 3,
+      max_cues: 2,
+      max_decoded_text_bytes: 2,
+   };
+
+   /// Track 1 decodes "x", then fails to decode its second sample; track 2
+   /// decodes "y".
+   fn local_decode_error_fixture() -> (Arc<SubtitleIndex>, BytesReader) {
       let mut first = one_cue_track(1, 0);
       let IndexedTrackState::Ready(track) = &mut first else {
          unreachable!()
@@ -1494,46 +1479,57 @@ mod tests {
          tracks: vec![first, one_cue_track(2, 6)],
       });
       let reader = BytesReader(vec![0, 1, b'x', 0, 2, b'!', 0, 1, b'y']);
-      let baseline = RequestLimits {
-         max_samples: 3,
-         max_cues: 2,
-         max_decoded_text_bytes: 2,
-      };
+      (index, reader)
+   }
+
+   #[tokio::test]
+   async fn local_decode_error_skips_the_failing_track_within_the_baseline_budget() {
+      let (index, reader) = local_decode_error_fixture();
       let tracks = Arc::clone(&index)
-         .subtitles_with_limits(&reader, None, None, baseline)
+         .subtitles_with_limits(&reader, None, None, LOCAL_DECODE_ERROR_BASELINE)
          .await
          .unwrap();
       assert_eq!(tracks.len(), 1);
       assert_eq!(tracks[0].base.id, 2);
       assert_eq!(tracks[0].cues[0].text, "y");
-      for limits in [
-         RequestLimits {
-            max_samples: 2,
-            ..baseline
-         },
-         RequestLimits {
-            max_cues: 1,
-            ..baseline
-         },
-         RequestLimits {
-            max_decoded_text_bytes: 1,
-            ..baseline
-         },
-      ] {
-         assert!(matches!(
-            Arc::clone(&index)
-               .subtitles_with_limits(&reader, None, None, limits)
-               .await,
-            Err(MediaParserError::Other(_))
-         ));
-      }
+   }
+
+   #[rstest]
+   #[case::sample_limit(RequestLimits {
+      max_samples: 2,
+      ..LOCAL_DECODE_ERROR_BASELINE
+   })]
+   #[case::cue_limit(RequestLimits {
+      max_cues: 1,
+      ..LOCAL_DECODE_ERROR_BASELINE
+   })]
+   #[case::decoded_text_byte_limit(RequestLimits {
+      max_decoded_text_bytes: 1,
+      ..LOCAL_DECODE_ERROR_BASELINE
+   })]
+   #[tokio::test]
+   async fn local_decode_error_charges_each_request_budget_without_refund(
+      #[case] limits: RequestLimits,
+   ) {
+      let (index, reader) = local_decode_error_fixture();
+      assert!(matches!(
+         Arc::clone(&index)
+            .subtitles_with_limits(&reader, None, None, limits)
+            .await,
+         Err(MediaParserError::Other(_))
+      ));
+   }
+
+   #[tokio::test]
+   async fn local_decode_error_charges_the_sample_read_budget_without_refund() {
+      let (index, reader) = local_decode_error_fixture();
       let read_limits = SampleReadLimits {
          max_samples: 2,
          ..SUBTITLE_READ_LIMITS
       };
       assert!(
          matches!(Arc::clone(&index).subtitles_with_request_and_read_limits(
-         &reader, None, None, baseline, read_limits, false).await,
+         &reader, None, None, LOCAL_DECODE_ERROR_BASELINE, read_limits, false).await,
          Err(MediaParserError::Other(reason)) if reason.contains("too many samples"))
       );
    }
@@ -1603,34 +1599,33 @@ mod tests {
       assert_eq!(tracks[0].cues[0].text, "x");
    }
 
+   const ONE_CUE_BASELINE: RequestLimits = RequestLimits {
+      max_samples: 1,
+      max_cues: 1,
+      max_decoded_text_bytes: 1,
+   };
+
+   #[rstest]
+   #[case::sample_limit(RequestLimits {
+      max_samples: 0,
+      ..ONE_CUE_BASELINE
+   })]
+   #[case::cue_limit(RequestLimits {
+      max_cues: 0,
+      ..ONE_CUE_BASELINE
+   })]
+   #[case::decoded_text_byte_limit(RequestLimits {
+      max_decoded_text_bytes: 0,
+      ..ONE_CUE_BASELINE
+   })]
    #[tokio::test]
-   async fn request_limits_reject_one_over_each_boundary() {
+   async fn request_limits_reject_one_over_each_boundary(#[case] limits: RequestLimits) {
       let index = Arc::new(one_cue_index());
       let reader = BytesReader(vec![0, 1, b'x']);
-      let baseline = RequestLimits {
-         max_samples: 1,
-         max_cues: 1,
-         max_decoded_text_bytes: 1,
-      };
-      for limits in [
-         RequestLimits {
-            max_samples: 0,
-            ..baseline
-         },
-         RequestLimits {
-            max_cues: 0,
-            ..baseline
-         },
-         RequestLimits {
-            max_decoded_text_bytes: 0,
-            ..baseline
-         },
-      ] {
-         Arc::clone(&index)
-            .subtitles_with_limits(&reader, None, None, limits)
-            .await
-            .expect_err("one-over request boundary");
-      }
+      Arc::clone(&index)
+         .subtitles_with_limits(&reader, None, None, limits)
+         .await
+         .expect_err("one-over request boundary");
    }
 
    fn index_track_with_stco_count(count: usize) -> Vec<u8> {
@@ -1647,16 +1642,15 @@ mod tests {
       track
    }
 
+   #[rstest]
+   #[case::fits_byte_ceiling_then_fails_validation(4_194_240, "invalid subtitle sample tables")]
+   #[case::stco_refused_after_charging_tables(MAX_RETAINED_INDEX_BYTES / 8 + 1, "retained")]
    #[tokio::test]
-   async fn rejected_stco_refunds_retained_bytes_and_preserves_sibling() {
-      for (count, reason) in [
-         // Fits the individual byte ceiling, then fails sample-table validation.
-         (4_194_240, "invalid subtitle sample tables"),
-         // Refuses the stco allocation after charging the preceding tables.
-         (MAX_RETAINED_INDEX_BYTES / 8 + 1, "retained"),
-      ] {
-         assert_rejected_stco_preserves_sibling(count, reason).await;
-      }
+   async fn rejected_stco_refunds_retained_bytes_and_preserves_sibling(
+      #[case] count: usize,
+      #[case] reason: &str,
+   ) {
+      assert_rejected_stco_preserves_sibling(count, reason).await;
    }
 
    async fn assert_rejected_stco_preserves_sibling(count: usize, reason: &str) {
@@ -1857,52 +1851,42 @@ mod tests {
          .expect_err("real request forwards subtitle sample limit");
    }
 
+   #[rstest]
+   #[case::unfiltered(None, false, &["track ID", "language", "narrower time range"], &[])]
+   #[case::language_filtered(
+      Some(TrackFilter::Language("eng".to_owned())),
+      false,
+      &["exact track ID", "narrower time range"],
+      &["or language"],
+   )]
+   #[case::track_id_filtered(
+      Some(TrackFilter::TrackId(1)),
+      false,
+      &["narrower time range"],
+      &["track ID", "language"],
+   )]
+   #[case::first_track(None, true, &["narrower time range"], &["track ID", "language"])]
    #[tokio::test]
-   async fn unfiltered_limit_suggests_track_id_language_or_narrower_range() {
+   async fn limit_suggests_only_the_remaining_ways_to_narrow(
+      #[case] filter: Option<TrackFilter>,
+      #[case] first_track_only: bool,
+      #[case] suggested: &[&str],
+      #[case] not_suggested: &[&str],
+   ) {
       let reason = limit_reason(
-         one_cue_logical_limit_error(None, false).await,
+         one_cue_logical_limit_error(filter, first_track_only).await,
          "sample batch is too large: 3 bytes",
       );
 
-      assert!(reason.contains("track ID"));
-      assert!(reason.contains("language"));
-      assert!(reason.contains("narrower time range"));
-   }
-
-   #[tokio::test]
-   async fn language_filtered_limit_suggests_exact_track_id_or_narrower_range() {
-      let reason = limit_reason(
-         one_cue_logical_limit_error(Some(TrackFilter::Language("eng".to_owned())), false).await,
-         "sample batch is too large: 3 bytes",
-      );
-
-      assert!(reason.contains("exact track ID"));
-      assert!(reason.contains("narrower time range"));
-      assert!(!reason.contains("or language"));
-   }
-
-   #[tokio::test]
-   async fn track_id_filtered_limit_suggests_only_a_narrower_range() {
-      let reason = limit_reason(
-         one_cue_logical_limit_error(Some(TrackFilter::TrackId(1)), false).await,
-         "sample batch is too large: 3 bytes",
-      );
-
-      assert!(reason.contains("narrower time range"));
-      assert!(!reason.contains("track ID"));
-      assert!(!reason.contains("language"));
-   }
-
-   #[tokio::test]
-   async fn first_track_limit_suggests_only_a_narrower_range() {
-      let reason = limit_reason(
-         one_cue_logical_limit_error(None, true).await,
-         "sample batch is too large: 3 bytes",
-      );
-
-      assert!(reason.contains("narrower time range"));
-      assert!(!reason.contains("track ID"));
-      assert!(!reason.contains("language"));
+      for text in suggested {
+         assert!(reason.contains(text), "{reason:?} must suggest {text:?}");
+      }
+      for text in not_suggested {
+         assert!(
+            !reason.contains(text),
+            "{reason:?} must not suggest {text:?}"
+         );
+      }
    }
 
    #[tokio::test]

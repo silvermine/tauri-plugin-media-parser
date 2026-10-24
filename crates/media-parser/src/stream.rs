@@ -724,6 +724,7 @@ impl StreamReader for HttpStreamReader {
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
    use std::io::Write;
    use tempfile::NamedTempFile;
 
@@ -754,37 +755,31 @@ mod tests {
       assert_eq!(parse_content_range("bytes 0-3/not-a-size"), None);
    }
 
-   #[tokio::test]
-   async fn test_read_at_beginning() {
-      let test_file = create_test_file(TEST_CONTENT);
-      let reader = FileStreamReader::new(test_file.path()).unwrap();
-
-      let mut buffer = vec![0u8; TEST_CONTENT.len()];
-      let bytes_read = reader.read_at(0, &mut buffer).await.unwrap();
-
-      assert_eq!(bytes_read, TEST_CONTENT.len());
-      assert_eq!(&buffer[..bytes_read], TEST_CONTENT);
-   }
-
    // HttpStreamReader tests
    use wiremock::matchers::{header, method};
    use wiremock::{Mock, MockServer, ResponseTemplate};
 
    #[tokio::test]
-   async fn test_http_header_count_is_limited_before_building_the_client() {
-      for count in [64, 65, 24_576] {
-         let headers = (0..count)
-            .map(|i| (format!("x-test-{i}"), "v".into()))
-            .collect();
-         let result = HttpStreamReader::with_headers("https://example.com/file", headers).await;
-         if count == 64 {
-            assert!(result.is_ok());
-         } else {
-            assert!(
-               matches!(result, Err(MediaParserError::HttpRequest(message)) if message.contains("64"))
-            );
-         }
-      }
+   async fn test_http_header_count_at_the_limit_is_accepted() {
+      let headers = (0..64)
+         .map(|i| (format!("x-test-{i}"), "v".into()))
+         .collect();
+      let result = HttpStreamReader::with_headers("https://example.com/file", headers).await;
+      assert!(result.is_ok());
+   }
+
+   #[rstest]
+   #[case::one_over_limit(65)]
+   #[case::far_over_limit(24_576)]
+   #[tokio::test]
+   async fn test_http_header_count_is_limited_before_building_the_client(#[case] count: usize) {
+      let headers = (0..count)
+         .map(|i| (format!("x-test-{i}"), "v".into()))
+         .collect();
+      let result = HttpStreamReader::with_headers("https://example.com/file", headers).await;
+      assert!(
+         matches!(result, Err(MediaParserError::HttpRequest(message)) if message.contains("64"))
+      );
    }
 
    #[tokio::test]
@@ -831,8 +826,9 @@ mod tests {
       }
    }
 
-   #[tokio::test]
-   async fn test_http_same_origin_redirects_keep_headers_and_the_ten_hop_limit() {
+   /// Reads from step `start` of a same-origin redirect chain that serves `data` at step 11 and
+   /// only answers requests that still carry the `X-Api-Key` header.
+   async fn same_origin_redirect_reader(start: usize) -> (MockServer, HttpStreamReader) {
       let server = MockServer::start().await;
       Mock::given(header("X-Api-Key", "test-secret"))
          .respond_with(|request: &wiremock::Request| {
@@ -845,30 +841,37 @@ mod tests {
          })
          .mount(&server)
          .await;
-      for (start, allowed) in [(1, true), (0, false)] {
-         let reader = HttpStreamReader::with_headers_and_redirect_policy(
-            &format!("{}/{start}", server.uri()),
-            HashMap::from([("X-Api-Key".into(), "test-secret".into())]),
-            true,
-         )
-         .await
-         .unwrap();
-         let result = reader.size().await;
-         if allowed {
-            assert_eq!(result.unwrap(), 4);
-            assert_eq!(reader.read_vec(0, 4).await.unwrap(), b"data");
-         } else {
-            for error in [
-               result.unwrap_err(),
-               reader.read_vec(0, 4).await.unwrap_err(),
-            ] {
-               assert!(
-                  matches!(error, MediaParserError::HttpRequest(ref message)
-                     if message.contains("error following redirect") && !message.contains("same-origin policy")),
-                  "unexpected error: {error:?}"
-               );
-            }
-         }
+      let reader = HttpStreamReader::with_headers_and_redirect_policy(
+         &format!("{}/{start}", server.uri()),
+         HashMap::from([("X-Api-Key".into(), "test-secret".into())]),
+         true,
+      )
+      .await
+      .unwrap();
+      (server, reader)
+   }
+
+   #[tokio::test]
+   async fn test_http_same_origin_redirects_keep_headers_for_ten_hops() {
+      let (_server, reader) = same_origin_redirect_reader(1).await;
+
+      assert_eq!(reader.size().await.unwrap(), 4);
+      assert_eq!(reader.read_vec(0, 4).await.unwrap(), b"data");
+   }
+
+   #[tokio::test]
+   async fn test_http_same_origin_redirects_are_limited_to_ten_hops() {
+      let (_server, reader) = same_origin_redirect_reader(0).await;
+
+      for error in [
+         reader.size().await.unwrap_err(),
+         reader.read_vec(0, 4).await.unwrap_err(),
+      ] {
+         assert!(
+            matches!(error, MediaParserError::HttpRequest(ref message)
+               if message.contains("error following redirect") && !message.contains("same-origin policy")),
+            "unexpected error: {error:?}"
+         );
       }
    }
 
@@ -1062,95 +1065,72 @@ mod tests {
       assert_eq!(reader.size().await.unwrap(), TEST_CONTENT.len() as u64);
    }
 
+   #[rstest]
+   #[case::mismatched_content_range(
+      10,
+      ResponseTemplate::new(206)
+         .set_body_bytes(b"data")
+         .insert_header("Content-Range", "bytes 0-3/100"),
+      "Content-Range",
+   )]
+   #[case::truncated_partial_response(
+      0,
+      ResponseTemplate::new(206)
+         .set_body_bytes(b"ab")
+         .insert_header("Content-Range", "bytes 0-3/100"),
+      "body length",
+   )]
+   #[case::server_ignoring_nonzero_range(
+      10,
+      ResponseTemplate::new(200).set_body_bytes(TEST_CONTENT),
+      "ignored",
+   )]
    #[tokio::test]
-   async fn test_http_rejects_mismatched_content_range() {
+   async fn test_http_rejects_responses_not_matching_the_range(
+      #[case] offset: u64,
+      #[case] response: ResponseTemplate,
+      #[case] expected_error: &str,
+   ) {
       let mock_server = MockServer::start().await;
+      let range = format!(
+         "bytes={offset}-{}",
+         offset + EXPECTED_HTTP_READ_AHEAD_BYTES as u64 - 1
+      );
       Mock::given(method("GET"))
-         .and(header(
-            "Range",
-            format!("bytes=10-{}", 10 + EXPECTED_HTTP_READ_AHEAD_BYTES - 1).as_str(),
-         ))
-         .respond_with(
-            ResponseTemplate::new(206)
-               .set_body_bytes(b"data")
-               .insert_header("Content-Range", "bytes 0-3/100"),
-         )
+         .and(header("Range", range.as_str()))
+         .respond_with(response)
          .mount(&mock_server)
          .await;
 
       let reader = HttpStreamReader::new(&mock_server.uri()).await.unwrap();
       let mut buffer = [0; 4];
-      let error = reader.read_at(10, &mut buffer).await.unwrap_err();
+      let error = reader.read_at(offset, &mut buffer).await.unwrap_err();
 
       assert!(
-         matches!(error, MediaParserError::HttpRequest(message) if message.contains("Content-Range"))
+         matches!(error, MediaParserError::HttpRequest(message) if message.contains(expected_error))
       );
    }
 
+   #[rstest]
+   // Ask for more bytes than remain; the result is truncated to EOF
+   #[case::truncated_at_eof(
+      TEST_CONTENT.len() as u64 - 4,
+      100,
+      &TEST_CONTENT[TEST_CONTENT.len() - 4..]
+   )]
+   // Reads starting beyond EOF return an empty buffer
+   #[case::starts_beyond_eof(TEST_CONTENT.len() as u64 + 100, 16, &[])]
    #[tokio::test]
-   async fn test_http_rejects_a_truncated_partial_response() {
-      let mock_server = MockServer::start().await;
-      Mock::given(method("GET"))
-         .and(header(
-            "Range",
-            format!("bytes=0-{}", EXPECTED_HTTP_READ_AHEAD_BYTES - 1).as_str(),
-         ))
-         .respond_with(
-            ResponseTemplate::new(206)
-               .set_body_bytes(b"ab")
-               .insert_header("Content-Range", "bytes 0-3/100"),
-         )
-         .mount(&mock_server)
-         .await;
-
-      let reader = HttpStreamReader::new(&mock_server.uri()).await.unwrap();
-      let mut buffer = [0; 4];
-      let error = reader.read_at(0, &mut buffer).await.unwrap_err();
-
-      assert!(
-         matches!(error, MediaParserError::HttpRequest(message) if message.contains("body length"))
-      );
-   }
-
-   #[tokio::test]
-   async fn test_http_rejects_server_ignoring_nonzero_range() {
-      let mock_server = MockServer::start().await;
-      Mock::given(method("GET"))
-         .and(header(
-            "Range",
-            format!("bytes=10-{}", 10 + EXPECTED_HTTP_READ_AHEAD_BYTES - 1).as_str(),
-         ))
-         .respond_with(ResponseTemplate::new(200).set_body_bytes(TEST_CONTENT))
-         .mount(&mock_server)
-         .await;
-
-      let reader = HttpStreamReader::new(&mock_server.uri()).await.unwrap();
-      let mut buffer = [0; 4];
-      let error = reader.read_at(10, &mut buffer).await.unwrap_err();
-
-      assert!(
-         matches!(error, MediaParserError::HttpRequest(message) if message.contains("ignored"))
-      );
-   }
-
-   #[tokio::test]
-   async fn test_file_read_vec_truncates_at_eof() {
+   async fn test_file_read_vec_truncates_at_eof(
+      #[case] offset: u64,
+      #[case] len: usize,
+      #[case] expected: &[u8],
+   ) {
       let test_file = create_test_file(TEST_CONTENT);
       let reader = FileStreamReader::new(test_file.path()).unwrap();
 
-      // Ask for more bytes than remain; the result is truncated to EOF
-      let data = reader
-         .read_vec(TEST_CONTENT.len() as u64 - 4, 100)
-         .await
-         .unwrap();
-      assert_eq!(data, &TEST_CONTENT[TEST_CONTENT.len() - 4..]);
-
-      // Reads starting beyond EOF return an empty buffer
-      let data = reader
-         .read_vec(TEST_CONTENT.len() as u64 + 100, 16)
-         .await
-         .unwrap();
-      assert!(data.is_empty());
+      let data = reader.read_vec(offset, len).await.unwrap();
+      assert_eq!(data, expected);
    }
 
    #[tokio::test]
@@ -1171,30 +1151,25 @@ mod tests {
       assert_eq!(&buffer[..bytes_read], expected);
    }
 
+   #[rstest]
+   #[case::at_beginning(0, TEST_CONTENT.len(), TEST_CONTENT)]
+   // Read beyond EOF returns 0
+   #[case::beyond_eof(TEST_CONTENT.len() as u64 + 100, 100, &[])]
+   #[case::empty_buffer(0, 0, &[])]
    #[tokio::test]
-   async fn test_file_read_beyond_eof() {
+   async fn test_file_read_at(
+      #[case] offset: u64,
+      #[case] buffer_len: usize,
+      #[case] expected: &[u8],
+   ) {
       let test_file = create_test_file(TEST_CONTENT);
       let reader = FileStreamReader::new(test_file.path()).unwrap();
 
-      let mut buffer = vec![0u8; 100];
+      let mut buffer = vec![0u8; buffer_len];
+      let bytes_read = reader.read_at(offset, &mut buffer).await.unwrap();
 
-      // Read beyond EOF returns 0
-      let bytes_read = reader
-         .read_at(TEST_CONTENT.len() as u64 + 100, &mut buffer)
-         .await
-         .unwrap();
-      assert_eq!(bytes_read, 0);
-   }
-
-   #[tokio::test]
-   async fn test_file_read_empty_buffer() {
-      let test_file = create_test_file(TEST_CONTENT);
-      let reader = FileStreamReader::new(test_file.path()).unwrap();
-
-      let mut buffer: Vec<u8> = vec![];
-      let bytes_read = reader.read_at(0, &mut buffer).await.unwrap();
-
-      assert_eq!(bytes_read, 0);
+      assert_eq!(bytes_read, expected.len());
+      assert_eq!(&buffer[..bytes_read], expected);
    }
 
    #[tokio::test]

@@ -472,37 +472,22 @@ fn decode_comment_frame(data: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
 
-   #[test]
-   fn test_decode_id3_text_utf8() {
-      let data = [3, b'H', b'e', b'l', b'l', b'o']; // encoding=3 (UTF-8)
-      assert_eq!(decode_id3_text(&data), Some("Hello".to_string()));
-   }
-
-   #[test]
-   fn test_decode_id3_text_latin1() {
-      let data = [0, b'H', b'e', b'l', b'l', b'o']; // encoding=0 (Latin-1)
-      assert_eq!(decode_id3_text(&data), Some("Hello".to_string()));
-   }
-
-   #[test]
-   fn test_decode_id3_text_utf16_le() {
-      // encoding=1, BOM=FF FE (LE), "Hi"
-      let data = [1, 0xFF, 0xFE, 0x48, 0x00, 0x69, 0x00];
-      assert_eq!(decode_id3_text(&data), Some("Hi".to_string()));
-   }
-
-   #[test]
-   fn test_decode_id3_text_utf16_be() {
-      // encoding=1, BOM=FE FF (BE), "Hi"
-      let data = [1, 0xFE, 0xFF, 0x00, 0x48, 0x00, 0x69];
-      assert_eq!(decode_id3_text(&data), Some("Hi".to_string()));
-   }
-
-   #[test]
-   fn test_decode_id3_text_empty() {
-      assert_eq!(decode_id3_text(&[]), None);
-      assert_eq!(decode_id3_text(&[0]), None); // Only encoding byte, no text
+   #[rstest]
+   // encoding=3 (UTF-8)
+   #[case::utf8(&[3, b'H', b'e', b'l', b'l', b'o'], Some("Hello"))]
+   // encoding=0 (Latin-1)
+   #[case::latin1(&[0, b'H', b'e', b'l', b'l', b'o'], Some("Hello"))]
+   // encoding=1, BOM=FF FE (LE), "Hi"
+   #[case::utf16_le(&[1, 0xFF, 0xFE, 0x48, 0x00, 0x69, 0x00], Some("Hi"))]
+   // encoding=1, BOM=FE FF (BE), "Hi"
+   #[case::utf16_be(&[1, 0xFE, 0xFF, 0x00, 0x48, 0x00, 0x69], Some("Hi"))]
+   #[case::no_bytes(&[], None)]
+   // Only encoding byte, no text
+   #[case::encoding_byte_only(&[0], None)]
+   fn test_decode_id3_text(#[case] data: &[u8], #[case] expected: Option<&str>) {
+      assert_eq!(decode_id3_text(data).as_deref(), expected);
    }
 
    #[test]

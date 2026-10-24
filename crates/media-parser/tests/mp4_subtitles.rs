@@ -3,6 +3,7 @@ use media_parser::format::mp4::{SubtitleIndex, read_subtitles, read_subtitles_in
 use media_parser::{
    MediaParser, MediaParserError, Result, StreamReader, TrackFilter, parse_subtitles,
 };
+use rstest::rstest;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -648,6 +649,21 @@ fn find_bytes(bytes: &[u8], needle: &[u8]) -> usize {
       .expect("fixture byte sequence")
 }
 
+/// `subtitle_mp4()` with the four bytes at `offset` past the first `needle`
+/// overwritten by `replacement`.
+fn patched_subtitle_mp4(needle: &[u8; 4], offset: usize, replacement: [u8; 4]) -> Vec<u8> {
+   let mut bytes = subtitle_mp4();
+   let field = find_bytes(&bytes, needle) + offset;
+   bytes[field..field + 4].copy_from_slice(&replacement);
+   bytes
+}
+
+/// `subtitle_mp4()` with the first track's `tx3g` sample entry renamed to an
+/// unsupported codec, so the index rejects that track.
+fn rejected_first_track_mp4() -> Vec<u8> {
+   patched_subtitle_mp4(b"tx3g", 0, *b"junk")
+}
+
 #[tokio::test]
 async fn high_level_subtitles_dispatches_synthetic_mp4() {
    let parser = MediaParser::new(BytesReader(subtitle_mp4()));
@@ -665,50 +681,32 @@ async fn high_level_subtitles_dispatches_synthetic_mp4() {
    assert_eq!(tracks[1].cues[0].text, "Hola");
 }
 
+#[rstest]
+#[case::decodes_wvtt_vttc_payload(
+   "wvtt",
+   mp4_box(b"vttc", &mp4_box(b"payl", b"WebVTT cue")),
+   "WebVTT cue",
+)]
+#[case::decodes_length_prefixed_quicktime_text("text", tx3g("QuickTime cue!"), "QuickTime cue!")]
+#[case::preserves_stpp_payload("stpp", b"<p>cue</p>".to_vec(), "<p>cue</p>")]
 #[tokio::test]
-async fn high_level_subtitles_decodes_wvtt_vttc_payload() {
-   let sample = mp4_box(b"vttc", &mp4_box(b"payl", b"WebVTT cue"));
-   let parser = MediaParser::new(BytesReader(single_codec_subtitle_mp4(b"wvtt", sample)));
-
-   let tracks = parser.subtitles(None).await.expect("extract WebVTT track");
-
-   assert_eq!(tracks.len(), 1);
-   assert_eq!(tracks[0].base.codec, "wvtt");
-   assert_eq!(tracks[0].cues.len(), 1);
-   assert_eq!(tracks[0].cues[0].text, "WebVTT cue");
-}
-
-#[tokio::test]
-async fn high_level_subtitles_decodes_length_prefixed_quicktime_text() {
-   let parser = MediaParser::new(BytesReader(single_codec_subtitle_mp4(
-      b"text",
-      tx3g("QuickTime cue!"),
-   )));
+async fn high_level_subtitles_extracts_single_codec_payload(
+   #[case] codec: &str,
+   #[case] sample: Vec<u8>,
+   #[case] text: &str,
+) {
+   let fourcc = codec.as_bytes().try_into().expect("four-character codec");
+   let parser = MediaParser::new(BytesReader(single_codec_subtitle_mp4(fourcc, sample)));
 
    let tracks = parser
       .subtitles(None)
       .await
-      .expect("extract QuickTime text track");
+      .expect("extract single-codec subtitle track");
 
    assert_eq!(tracks.len(), 1);
-   assert_eq!(tracks[0].base.codec, "text");
+   assert_eq!(tracks[0].base.codec, codec);
    assert_eq!(tracks[0].cues.len(), 1);
-   assert_eq!(tracks[0].cues[0].text, "QuickTime cue!");
-}
-
-#[tokio::test]
-async fn high_level_subtitles_preserves_stpp_payload() {
-   let parser = MediaParser::new(BytesReader(single_codec_subtitle_mp4(
-      b"stpp",
-      b"<p>cue</p>".to_vec(),
-   )));
-
-   let tracks = parser.subtitles(None).await.expect("extract stpp track");
-
-   assert_eq!(tracks.len(), 1);
-   assert_eq!(tracks[0].base.codec, "stpp");
-   assert_eq!(tracks[0].cues.len(), 1);
-   assert_eq!(tracks[0].cues[0].text, "<p>cue</p>");
+   assert_eq!(tracks[0].cues[0].text, text);
 }
 
 #[tokio::test]
@@ -746,39 +744,37 @@ async fn high_level_subtitles_returns_empty_for_mp3_without_mp4_parsing() {
    assert_eq!(reader.ranges(), vec![(0, 32)]);
 }
 
+#[rstest]
+#[case::empty_range((Duration::from_secs(1), Duration::from_secs(1)))]
+#[case::reversed_range((Duration::from_secs(2), Duration::from_secs(1)))]
 #[tokio::test]
-async fn high_level_invalid_subtitle_ranges_perform_no_reads() {
-   for range in [
-      (Duration::from_secs(1), Duration::from_secs(1)),
-      (Duration::from_secs(2), Duration::from_secs(1)),
-   ] {
-      let reader = CountingReader::new(subtitle_mp4());
-      let parser = MediaParser::new(&reader);
+async fn high_level_invalid_subtitle_ranges_perform_no_reads(#[case] range: (Duration, Duration)) {
+   let reader = CountingReader::new(subtitle_mp4());
+   let parser = MediaParser::new(&reader);
 
-      parser
-         .subtitles_in_range(None, range)
-         .await
-         .expect_err("invalid high-level subtitle range");
+   parser
+      .subtitles_in_range(None, range)
+      .await
+      .expect_err("invalid high-level subtitle range");
 
-      assert_eq!(reader.reads(), 0);
-   }
+   assert_eq!(reader.reads(), 0);
 }
 
+#[rstest]
+#[case::empty_range((Duration::from_secs(1), Duration::from_secs(1)))]
+#[case::reversed_range((Duration::from_secs(2), Duration::from_secs(1)))]
 #[tokio::test]
-async fn high_level_registry_invalid_subtitle_ranges_perform_no_reads() {
-   for range in [
-      (Duration::from_secs(1), Duration::from_secs(1)),
-      (Duration::from_secs(2), Duration::from_secs(1)),
-   ] {
-      let reader = CountingReader::new(subtitle_mp4());
+async fn high_level_registry_invalid_subtitle_ranges_perform_no_reads(
+   #[case] range: (Duration, Duration),
+) {
+   let reader = CountingReader::new(subtitle_mp4());
 
-      let error = parse_subtitles(&reader, None, Some(range))
-         .await
-         .expect_err("invalid registry subtitle range");
+   let error = parse_subtitles(&reader, None, Some(range))
+      .await
+      .expect_err("invalid registry subtitle range");
 
-      assert!(matches!(error, MediaParserError::SubtitleError(_)));
-      assert_eq!(reader.reads(), 0);
-   }
+   assert!(matches!(error, MediaParserError::SubtitleError(_)));
+   assert_eq!(reader.reads(), 0);
 }
 
 #[tokio::test]
@@ -859,13 +855,17 @@ async fn hardening_invalid_ranges_perform_no_reads() {
 }
 
 #[tokio::test]
-async fn hardening_trak_limit_counts_irrelevant_and_malformed_boxes() {
+async fn hardening_trak_limit_accepts_exactly_1000_boxes() {
    let malformed = mp4_box(b"trak", &[]);
    let accepted = BytesReader(mp4_box(b"moov", &malformed.repeat(1000)));
    SubtitleIndex::read(&accepted)
       .await
       .expect("exactly 1000 trak boxes are accepted");
+}
 
+#[tokio::test]
+async fn hardening_trak_limit_counts_irrelevant_and_malformed_boxes() {
+   let malformed = mp4_box(b"trak", &[]);
    let rejected = BytesReader(mp4_box(b"moov", &malformed.repeat(1001)));
    let error = SubtitleIndex::read(&rejected)
       .await
@@ -894,22 +894,34 @@ async fn hardening_track_local_decode_failure_never_returns_a_partial_track() {
       .expect_err("explicit bad track reports its decode error");
 }
 
+#[rstest]
+#[case::broad(None)]
+#[case::by_language(Some(TrackFilter::Language("eng".to_owned())))]
 #[tokio::test]
-async fn hardening_invalid_first_track_offset_is_skipped_broadly_and_by_language() {
+async fn hardening_invalid_first_track_offset_is_skipped_broadly_and_by_language(
+   #[case] filter: Option<TrackFilter>,
+) {
    let mut bytes = same_language_subtitle_mp4();
    let first_stco = find_bytes(&bytes, b"stco") + 12;
    bytes[first_stco..first_stco + 4].copy_from_slice(&u32::MAX.to_be_bytes());
    let reader = BytesReader(bytes);
    let index = Arc::new(SubtitleIndex::read(&reader).await.expect("build index"));
 
-   for filter in [None, Some(TrackFilter::Language("eng".to_owned()))] {
-      let tracks = Arc::clone(&index)
-         .subtitles(&reader, filter, None)
-         .await
-         .expect("track-local offset failure is skipped");
-      assert_eq!(tracks.len(), 1);
-      assert_eq!(tracks[0].base.id, 2);
-   }
+   let tracks = Arc::clone(&index)
+      .subtitles(&reader, filter, None)
+      .await
+      .expect("track-local offset failure is skipped");
+   assert_eq!(tracks.len(), 1);
+   assert_eq!(tracks[0].base.id, 2);
+}
+
+#[tokio::test]
+async fn hardening_invalid_first_track_offset_errors_when_explicitly_selected() {
+   let mut bytes = same_language_subtitle_mp4();
+   let first_stco = find_bytes(&bytes, b"stco") + 12;
+   bytes[first_stco..first_stco + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+   let reader = BytesReader(bytes);
+   let index = Arc::new(SubtitleIndex::read(&reader).await.expect("build index"));
 
    let error = Arc::clone(&index)
       .subtitles(&reader, Some(TrackFilter::TrackId(1)), None)
@@ -957,7 +969,7 @@ async fn hardening_short_first_track_read_is_track_local_but_reader_error_is_fat
 }
 
 #[tokio::test]
-async fn hardening_track_id_zero_is_an_ordinary_exact_filter() {
+async fn hardening_track_id_zero_selects_the_zero_id_track() {
    let mut bytes = subtitle_mp4();
    patch_first_track_id(&mut bytes, 0);
    let reader = BytesReader(bytes);
@@ -967,6 +979,14 @@ async fn hardening_track_id_zero_is_an_ordinary_exact_filter() {
       .expect("extract exact ID zero");
    assert_eq!(tracks.len(), 1);
    assert_eq!(tracks[0].base.id, 0);
+}
+
+#[tokio::test]
+async fn hardening_unmatched_track_id_returns_no_tracks() {
+   let mut bytes = subtitle_mp4();
+   patch_first_track_id(&mut bytes, 0);
+   let reader = BytesReader(bytes);
+
    assert!(
       read_subtitles(&reader, Some(TrackFilter::TrackId(99)))
          .await
@@ -976,7 +996,7 @@ async fn hardening_track_id_zero_is_an_ordinary_exact_filter() {
 }
 
 #[tokio::test]
-async fn hardening_edit_offset_clamps_crossing_cue_and_drops_zero_length_gap() {
+async fn hardening_edit_offset_clamps_a_crossing_cue() {
    let reader = BytesReader(subtitle_mp4_with_edit(Some(500)));
    let tracks = read_subtitles(&reader, Some(TrackFilter::TrackId(1)))
       .await
@@ -984,7 +1004,10 @@ async fn hardening_edit_offset_clamps_crossing_cue_and_drops_zero_length_gap() {
    assert_eq!(tracks[0].cues[0].start_time, Duration::ZERO);
    assert_eq!(tracks[0].cues[0].end_time, Duration::from_millis(500));
    assert_eq!(tracks[0].cues[1].start_time, Duration::from_millis(500));
+}
 
+#[tokio::test]
+async fn hardening_edit_offset_drops_a_zero_length_first_cue() {
    let reader = BytesReader(subtitle_mp4_with_edit(Some(1000)));
    let tracks = read_subtitles(&reader, Some(TrackFilter::TrackId(1)))
       .await
@@ -1115,11 +1138,17 @@ async fn hardening_empty_and_whitespace_samples_are_timing_gaps() {
    assert_eq!(tracks[0].cues[0].cue_id, 2);
 }
 
+#[rstest]
+#[case::unsupported_codec(rejected_first_track_mp4())]
+#[case::variable_stsz_count_above_limit(patched_subtitle_mp4(b"stsz", 12, u32::MAX.to_be_bytes()))]
+#[case::fixed_stsz_count_mismatch(fixed_stsz_count_mismatch_mp4())]
+#[case::invalid_sample_description_reference(patched_subtitle_mp4(b"stsc", 20, 2u32.to_be_bytes()))]
+#[case::mixed_referenced_supported_descriptions(description_policy_mp4(*b"wvtt", true))]
+#[case::referenced_unsupported_description(description_policy_mp4(*b"junk", true))]
 #[tokio::test]
-async fn hardening_unsupported_codec_is_skipped_broadly_and_errors_explicitly() {
-   let mut bytes = subtitle_mp4();
-   let codec = find_bytes(&bytes, b"tx3g");
-   bytes[codec..codec + 4].copy_from_slice(b"junk");
+async fn hardening_track_rejection_is_skipped_broadly_and_errors_explicitly(
+   #[case] bytes: Vec<u8>,
+) {
    let reader = BytesReader(bytes);
    let index = Arc::new(
       SubtitleIndex::read(&reader)
@@ -1136,7 +1165,7 @@ async fn hardening_unsupported_codec_is_skipped_broadly_and_errors_explicitly() 
    Arc::clone(&index)
       .subtitles(&reader, Some(TrackFilter::TrackId(1)), None)
       .await
-      .expect_err("explicit unsupported track errors");
+      .expect_err("explicit rejected track errors");
 }
 
 #[tokio::test]
@@ -1201,31 +1230,6 @@ async fn hardening_malformed_table_is_retained_as_a_track_rejection() {
 }
 
 #[tokio::test]
-async fn hardening_variable_stsz_count_above_limit_is_a_track_rejection() {
-   let mut bytes = subtitle_mp4();
-   let stsz = find_bytes(&bytes, b"stsz");
-   let sample_count = stsz + 12;
-   bytes[sample_count..sample_count + 4].copy_from_slice(&u32::MAX.to_be_bytes());
-   let reader = BytesReader(bytes);
-   let index = Arc::new(
-      SubtitleIndex::read(&reader)
-         .await
-         .expect("oversized malformed stsz should reject only its track"),
-   );
-
-   let broad = Arc::clone(&index)
-      .subtitles(&reader, None, None)
-      .await
-      .unwrap();
-   assert_eq!(broad.len(), 1);
-   assert_eq!(broad[0].base.id, 2);
-   Arc::clone(&index)
-      .subtitles(&reader, Some(TrackFilter::TrackId(1)), None)
-      .await
-      .expect_err("explicit malformed variable-size track errors");
-}
-
-#[tokio::test]
 async fn hardening_oversized_sample_preserves_sibling_unless_explicitly_selected() {
    let mut bytes = subtitle_mp4();
    let stsz = find_bytes(&bytes, b"stsz");
@@ -1254,28 +1258,14 @@ async fn hardening_oversized_sample_preserves_sibling_unless_explicitly_selected
    );
 }
 
+#[rstest]
+#[case::stsd(*b"stsd")]
+#[case::stts(*b"stts")]
+#[case::stsc(*b"stsc")]
+#[case::stco(*b"stco")]
+#[case::co64(*b"co64")]
 #[tokio::test]
-async fn hardening_fixed_stsz_count_mismatch_is_a_track_rejection() {
-   let reader = BytesReader(fixed_stsz_count_mismatch_mp4());
-   let index = Arc::new(
-      SubtitleIndex::read(&reader)
-         .await
-         .expect("inconsistent fixed stsz should reject only its track"),
-   );
-
-   let broad = Arc::clone(&index)
-      .subtitles(&reader, None, None)
-      .await
-      .unwrap();
-   assert_eq!(broad.len(), 1);
-   assert_eq!(broad[0].base.id, 2);
-   Arc::clone(&index)
-      .subtitles(&reader, Some(TrackFilter::TrackId(1)), None)
-      .await
-      .expect_err("explicit malformed fixed-size track errors");
-}
-
-async fn assert_oversized_table_count_is_track_local(fourcc: [u8; 4]) {
+async fn hardening_oversized_table_count_is_track_local(#[case] fourcc: [u8; 4]) {
    let mut bytes = subtitle_mp4();
    let table_fourcc = if fourcc == *b"co64" { *b"stco" } else { fourcc };
    let table = find_bytes(&bytes, &table_fourcc);
@@ -1294,85 +1284,6 @@ async fn assert_oversized_table_count_is_track_local(fourcc: [u8; 4]) {
       .unwrap();
    assert_eq!(broad.len(), 1);
    assert_eq!(broad[0].base.id, 2);
-}
-
-#[tokio::test]
-async fn hardening_oversized_stsd_count_is_track_local() {
-   assert_oversized_table_count_is_track_local(*b"stsd").await;
-}
-
-#[tokio::test]
-async fn hardening_oversized_stts_count_is_track_local() {
-   assert_oversized_table_count_is_track_local(*b"stts").await;
-}
-
-#[tokio::test]
-async fn hardening_oversized_stsc_count_is_track_local() {
-   assert_oversized_table_count_is_track_local(*b"stsc").await;
-}
-
-#[tokio::test]
-async fn hardening_oversized_stco_count_is_track_local() {
-   assert_oversized_table_count_is_track_local(*b"stco").await;
-}
-
-#[tokio::test]
-async fn hardening_oversized_co64_count_is_track_local() {
-   assert_oversized_table_count_is_track_local(*b"co64").await;
-}
-
-#[tokio::test]
-async fn hardening_invalid_sample_description_reference_is_track_local() {
-   let mut bytes = subtitle_mp4();
-   let stsc = find_bytes(&bytes, b"stsc");
-   let description_index = stsc + 20;
-   bytes[description_index..description_index + 4].copy_from_slice(&2u32.to_be_bytes());
-   let reader = BytesReader(bytes);
-   let index = Arc::new(
-      SubtitleIndex::read(&reader)
-         .await
-         .expect("index rejected track"),
-   );
-
-   let broad = Arc::clone(&index)
-      .subtitles(&reader, None, None)
-      .await
-      .unwrap();
-   assert_eq!(broad.len(), 1);
-   assert_eq!(broad[0].base.id, 2);
-   Arc::clone(&index)
-      .subtitles(&reader, Some(TrackFilter::TrackId(1)), None)
-      .await
-      .expect_err("explicit invalid description reference errors");
-}
-
-async fn assert_description_policy_rejects_track(bytes: Vec<u8>) {
-   let reader = BytesReader(bytes);
-   let index = Arc::new(
-      SubtitleIndex::read(&reader)
-         .await
-         .expect("index rejected description policy track"),
-   );
-   let broad = Arc::clone(&index)
-      .subtitles(&reader, None, None)
-      .await
-      .unwrap();
-   assert_eq!(broad.len(), 1);
-   assert_eq!(broad[0].base.id, 2);
-   Arc::clone(&index)
-      .subtitles(&reader, Some(TrackFilter::TrackId(1)), None)
-      .await
-      .expect_err("explicit rejected description track errors");
-}
-
-#[tokio::test]
-async fn hardening_mixed_referenced_supported_descriptions_reject_track() {
-   assert_description_policy_rejects_track(description_policy_mp4(*b"wvtt", true)).await;
-}
-
-#[tokio::test]
-async fn hardening_referenced_unsupported_description_rejects_track() {
-   assert_description_policy_rejects_track(description_policy_mp4(*b"junk", true)).await;
 }
 
 #[tokio::test]

@@ -751,6 +751,7 @@ mod tests {
    use super::*;
    use crate::decoders::h264::AvcColorMetadata;
    use objc2_core_media::{CMTimeFlags, kCMTimeInvalid};
+   use rstest::rstest;
 
    fn config(length_size: usize) -> AvcConfig {
       AvcConfig {
@@ -766,40 +767,53 @@ mod tests {
       }
    }
 
-   #[test]
-   fn open_config_requires_prepared_size_and_resolved_range() {
-      let mut missing_size = config(4);
-      missing_size.max_input_size = None;
+   #[rstest]
+   #[case::missing_max_input_size(
+      AvcConfig {
+         max_input_size: None,
+         ..config(4)
+      },
+      "max_input_size",
+   )]
+   #[case::missing_resolved_full_range(
+      AvcConfig {
+         resolved_full_range: None,
+         ..config(4)
+      },
+      "resolved_full_range",
+   )]
+   fn open_config_requires_prepared_size_and_resolved_range(
+      #[case] missing: AvcConfig,
+      #[case] field: &str,
+   ) {
       assert!(matches!(
-         validate_open_config(&missing_size),
-         Err(DecodeError::BackendContract(message)) if message.contains("max_input_size")
-      ));
-
-      let mut missing_range = config(4);
-      missing_range.resolved_full_range = None;
-      assert!(matches!(
-         validate_open_config(&missing_range),
-         Err(DecodeError::BackendContract(message)) if message.contains("resolved_full_range")
+         validate_open_config(&missing),
+         Err(DecodeError::BackendContract(message)) if message.contains(field)
       ));
    }
 
-   #[test]
-   fn open_config_widens_three_byte_nal_lengths_for_core_media() {
-      for (length_size, effective) in [(1, 1), (2, 2), (3, 4), (4, 4)] {
-         let validated = validate_open_config(&config(length_size)).expect("valid AVCC length");
-         assert_eq!(validated.length_size, effective);
-      }
+   #[rstest]
+   #[case::one_byte(1, 1)]
+   #[case::two_bytes(2, 2)]
+   #[case::three_bytes_widened(3, 4)]
+   #[case::four_bytes(4, 4)]
+   fn open_config_widens_only_three_byte_nal_lengths_for_core_media(
+      #[case] length_size: usize,
+      #[case] effective: usize,
+   ) {
+      let validated = validate_open_config(&config(length_size)).expect("valid AVCC length");
+      assert_eq!(validated.length_size, effective);
    }
 
-   #[test]
-   fn open_config_rejects_invalid_nal_lengths_before_core_media() {
-      for length_size in [0, 5] {
-         let expected = format!("length size {length_size}");
-         assert!(matches!(
-            validate_open_config(&config(length_size)),
-            Err(DecodeError::UnsupportedFormat(message)) if message.contains(&expected)
-         ));
-      }
+   #[rstest]
+   #[case::zero_bytes(0)]
+   #[case::five_bytes(5)]
+   fn open_config_rejects_invalid_nal_lengths_before_core_media(#[case] length_size: usize) {
+      let expected = format!("length size {length_size}");
+      assert!(matches!(
+         validate_open_config(&config(length_size)),
+         Err(DecodeError::UnsupportedFormat(message)) if message.contains(&expected)
+      ));
    }
 
    #[test]
@@ -843,30 +857,26 @@ mod tests {
       assert_eq!(pts_epoch, 0);
       assert_eq!(timing.decodeTimeStamp, unsafe { kCMTimeInvalid });
       assert_eq!(timing.duration, unsafe { kCMTimeInvalid });
+   }
 
+   #[test]
+   fn sample_timing_rejects_tokens_that_do_not_fit_cm_time_value() {
       assert!(matches!(
          sample_timing(FrameToken::new(u64::MAX)),
          Err(DecodeError::BackendContract(_))
       ));
    }
 
-   #[test]
-   fn create_result_classifies_every_status_pointer_pair() {
-      assert_eq!(
-         classify_create_result(0, true),
-         CreateResultClassification::Success
-      );
-      assert_eq!(
-         classify_create_result(0, false),
-         CreateResultClassification::ContractNull
-      );
-      assert_eq!(
-         classify_create_result(-12903, true),
-         CreateResultClassification::NativeFailureWithObject
-      );
-      assert_eq!(
-         classify_create_result(-12903, false),
-         CreateResultClassification::NativeFailure
-      );
+   #[rstest]
+   #[case::success_with_object(0, true, CreateResultClassification::Success)]
+   #[case::success_without_object(0, false, CreateResultClassification::ContractNull)]
+   #[case::failure_with_object(-12903, true, CreateResultClassification::NativeFailureWithObject)]
+   #[case::failure_without_object(-12903, false, CreateResultClassification::NativeFailure)]
+   fn create_result_classifies_every_status_pointer_pair(
+      #[case] status: i32,
+      #[case] pointer_present: bool,
+      #[case] expected: CreateResultClassification,
+   ) {
+      assert_eq!(classify_create_result(status, pointer_present), expected);
    }
 }

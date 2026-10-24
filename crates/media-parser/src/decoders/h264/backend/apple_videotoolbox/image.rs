@@ -251,6 +251,7 @@ impl OwnedNv12 {
 mod tests {
    use super::*;
    use crate::decoders::h264::DecodeError;
+   use rstest::rstest;
 
    fn plane<'a>(data: &'a [u8], width: usize, height: usize, row_stride: usize) -> Nv12Plane<'a> {
       Nv12Plane {
@@ -261,78 +262,74 @@ mod tests {
       }
    }
 
-   #[test]
-   fn converts_full_and_nonzero_lower_left_clean_rects() {
-      assert_eq!(
-         crop_from_clean_rect(
-            16,
-            12,
-            CleanRect {
-               x: 0.0,
-               y: 0.0,
-               width: 16.0,
-               height: 12.0,
-            }
-         ),
-         Ok(crate::decoders::h264::frame::Crop {
-            x: 0,
-            y: 0,
-            width: 16,
-            height: 12,
-         })
-      );
-      assert_eq!(
-         crop_from_clean_rect(
-            16,
-            12,
-            CleanRect {
-               x: 2.0,
-               y: 2.0,
-               width: 10.0,
-               height: 6.0,
-            }
-         ),
-         Ok(crate::decoders::h264::frame::Crop {
-            x: 2,
-            y: 4,
-            width: 10,
-            height: 6,
-         })
-      );
-   }
-
-   #[test]
-   fn rejects_nonfinite_fractional_negative_odd_and_out_of_bounds_clean_rects() {
-      let full = CleanRect {
+   #[rstest]
+   #[case::full(
+      CleanRect {
          x: 0.0,
          y: 0.0,
          width: 16.0,
          height: 12.0,
-      };
-      for rect in [
-         CleanRect {
-            x: f64::NAN,
-            ..full
-         },
-         CleanRect { x: 0.5, ..full },
-         CleanRect { x: -2.0, ..full },
-         CleanRect { x: 1.0, ..full },
-         CleanRect { width: 0.0, ..full },
-         CleanRect {
-            width: 18.0,
-            ..full
-         },
-         CleanRect {
-            y: f64::MAX,
-            height: f64::MAX,
-            ..full
-         },
-      ] {
-         assert!(matches!(
-            crop_from_clean_rect(16, 12, rect),
-            Err(DecodeError::UnsupportedFormat(_))
-         ));
-      }
+      },
+      Crop {
+         x: 0,
+         y: 0,
+         width: 16,
+         height: 12,
+      },
+   )]
+   #[case::nonzero_lower_left(
+      CleanRect {
+         x: 2.0,
+         y: 2.0,
+         width: 10.0,
+         height: 6.0,
+      },
+      Crop {
+         x: 2,
+         y: 4,
+         width: 10,
+         height: 6,
+      },
+   )]
+   fn converts_full_and_nonzero_lower_left_clean_rects(
+      #[case] rect: CleanRect,
+      #[case] expected: Crop,
+   ) {
+      assert_eq!(crop_from_clean_rect(16, 12, rect), Ok(expected));
+   }
+
+   const FULL: CleanRect = CleanRect {
+      x: 0.0,
+      y: 0.0,
+      width: 16.0,
+      height: 12.0,
+   };
+
+   #[rstest]
+   #[case::nan_x(CleanRect {
+      x: f64::NAN,
+      ..FULL
+   })]
+   #[case::fractional_x(CleanRect { x: 0.5, ..FULL })]
+   #[case::negative_x(CleanRect { x: -2.0, ..FULL })]
+   #[case::odd_x(CleanRect { x: 1.0, ..FULL })]
+   #[case::zero_width(CleanRect { width: 0.0, ..FULL })]
+   #[case::width_past_coded_edge(CleanRect {
+      width: 18.0,
+      ..FULL
+   })]
+   #[case::f64_max_y_and_height(CleanRect {
+      y: f64::MAX,
+      height: f64::MAX,
+      ..FULL
+   })]
+   fn rejects_nonfinite_fractional_negative_odd_and_out_of_bounds_clean_rects(
+      #[case] rect: CleanRect,
+   ) {
+      assert!(matches!(
+         crop_from_clean_rect(16, 12, rect),
+         Err(DecodeError::UnsupportedFormat(_))
+      ));
    }
 
    #[test]
@@ -368,27 +365,39 @@ mod tests {
       assert_eq!(planar.v.data, &owned.uv[1..]);
    }
 
-   #[test]
-   fn rejects_short_rows_planes_odd_dimensions_and_overflowing_geometry() {
+   static LUMA: [u8; 16] = [0; 16];
+   static CHROMA: [u8; 8] = [0; 8];
+
+   #[rstest]
+   #[case::short_luma_row_stride(4, 4, plane(&LUMA, 4, 4, 3), plane(&CHROMA, 2, 2, 4))]
+   #[case::short_luma_plane(4, 4, plane(&LUMA[..15], 4, 4, 4), plane(&CHROMA, 2, 2, 4))]
+   #[case::narrow_luma_plane(4, 4, plane(&LUMA, 3, 4, 4), plane(&CHROMA, 2, 2, 4))]
+   #[case::narrow_chroma_plane(4, 4, plane(&LUMA, 4, 4, 4), plane(&CHROMA, 1, 2, 4))]
+   #[case::odd_coded_width(3, 4, plane(&LUMA, 4, 4, 4), plane(&CHROMA, 2, 2, 4))]
+   fn rejects_short_rows_planes_and_odd_dimensions(
+      #[case] coded_width: usize,
+      #[case] coded_height: usize,
+      #[case] y_plane: Nv12Plane<'static>,
+      #[case] uv_plane: Nv12Plane<'static>,
+   ) {
       let clean = CleanRect {
          x: 0.0,
          y: 0.0,
          width: 4.0,
          height: 4.0,
       };
-      let y = [0; 16];
-      let uv = [0; 8];
-      let invalid = [
-         copy_nv12(4, 4, clean, plane(&y, 4, 4, 3), plane(&uv, 2, 2, 4)),
-         copy_nv12(4, 4, clean, plane(&y[..15], 4, 4, 4), plane(&uv, 2, 2, 4)),
-         copy_nv12(4, 4, clean, plane(&y, 3, 4, 4), plane(&uv, 2, 2, 4)),
-         copy_nv12(4, 4, clean, plane(&y, 4, 4, 4), plane(&uv, 1, 2, 4)),
-         copy_nv12(3, 4, clean, plane(&y, 4, 4, 4), plane(&uv, 2, 2, 4)),
-      ];
-      for result in invalid {
-         assert!(matches!(result, Err(DecodeError::UnsupportedFormat(_))));
-      }
+      let result = copy_nv12(coded_width, coded_height, clean, y_plane, uv_plane);
+      assert!(matches!(result, Err(DecodeError::UnsupportedFormat(_))));
+   }
 
+   #[test]
+   fn rejects_overflowing_geometry_as_a_resource_limit() {
+      let clean = CleanRect {
+         x: 0.0,
+         y: 0.0,
+         width: 4.0,
+         height: 4.0,
+      };
       let oversized = copy_nv12(
          usize::MAX - 1,
          usize::MAX - 1,

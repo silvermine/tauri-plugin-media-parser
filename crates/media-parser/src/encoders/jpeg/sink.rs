@@ -122,6 +122,7 @@ impl Write for FallibleJpegWriter {
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
    use std::io::Write;
 
    #[test]
@@ -183,21 +184,16 @@ mod tests {
       assert_eq!(output.finish(Ok(())).unwrap(), [1, 2, 3, 4, 5]);
    }
 
-   #[test]
-   fn writer_failure_overrides_native_success() {
-      for native_success in [false, true] {
-         let mut output = FallibleJpegWriter::new(1);
-         assert!(output.write_all(&[1, 2]).is_err());
-         let native = if native_success {
-            Ok(())
-         } else {
-            Err(JpegError::Encode("native failure".into()))
-         };
-         assert!(matches!(
-            output.finish(native),
-            Err(JpegError::OutputLimit(_))
-         ));
-      }
+   #[rstest]
+   #[case::native_failure(Err(JpegError::Encode("native failure".into())))]
+   #[case::native_success(Ok(()))]
+   fn writer_failure_overrides_native_result(#[case] native: Result<(), JpegError>) {
+      let mut output = FallibleJpegWriter::new(1);
+      assert!(output.write_all(&[1, 2]).is_err());
+      assert!(matches!(
+         output.finish(native),
+         Err(JpegError::OutputLimit(_))
+      ));
    }
 
    #[test]

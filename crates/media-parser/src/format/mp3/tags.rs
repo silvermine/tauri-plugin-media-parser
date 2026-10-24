@@ -115,6 +115,7 @@ pub fn frame_id_to_key(id: [u8; 4]) -> String {
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
 
    #[test]
    fn test_frame_defs_sorted() {
@@ -130,25 +131,23 @@ mod tests {
       }
    }
 
-   #[test]
-   fn test_frame_name_known() {
-      assert_eq!(frame_name(*b"TIT2"), "Title");
-      assert_eq!(frame_name(*b"TPE1"), "Artist");
-      assert_eq!(frame_name(*b"TALB"), "Album");
-      assert_eq!(frame_name(*b"TRCK"), "Track Number");
-      assert_eq!(frame_name(*b"TPOS"), "Disc Number");
-      assert_eq!(frame_name(*b"COMM"), "Comment");
+   #[rstest]
+   #[case::title(*b"TIT2", "Title")]
+   #[case::artist(*b"TPE1", "Artist")]
+   #[case::album(*b"TALB", "Album")]
+   #[case::track_number(*b"TRCK", "Track Number")]
+   #[case::disc_number(*b"TPOS", "Disc Number")]
+   #[case::comment(*b"COMM", "Comment")]
+   #[case::unlisted_id(*b"XXXX", "Unknown")]
+   #[case::zero_bytes(*b"\x00\x00\x00\x00", "Unknown")]
+   fn test_frame_name(#[case] id: [u8; 4], #[case] expected: &str) {
+      assert_eq!(frame_name(id), expected);
    }
 
-   #[test]
-   fn test_frame_name_unknown() {
-      assert_eq!(frame_name(*b"XXXX"), "Unknown");
-      assert_eq!(frame_name(*b"\x00\x00\x00\x00"), "Unknown");
-   }
-
-   #[test]
-   fn test_frame_id_to_key() {
-      assert_eq!(frame_id_to_key(*b"TIT2"), "TIT2");
-      assert_eq!(frame_id_to_key(*b"TPE1"), "TPE1");
+   #[rstest]
+   #[case::tit2(*b"TIT2", "TIT2")]
+   #[case::tpe1(*b"TPE1", "TPE1")]
+   fn test_frame_id_to_key(#[case] id: [u8; 4], #[case] expected: &str) {
+      assert_eq!(frame_id_to_key(id), expected);
    }
 }

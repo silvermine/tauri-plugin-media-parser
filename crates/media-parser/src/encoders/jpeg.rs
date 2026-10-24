@@ -109,13 +109,18 @@ mod windows_stream;
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
 
-   #[test]
-   fn rejects_quality_outside_the_encoder_range() {
-      assert_eq!(JpegQuality::new(0), None);
-      assert_eq!(JpegQuality::new(101), None);
-      assert_eq!(JpegQuality::new(1).map(JpegQuality::get), Some(1));
-      assert_eq!(JpegQuality::new(100).map(JpegQuality::get), Some(100));
+   #[rstest]
+   #[case::zero(0, None)]
+   #[case::above_range(101, None)]
+   #[case::lower_bound(1, Some(1))]
+   #[case::upper_bound(100, Some(100))]
+   fn accepts_only_quality_within_the_encoder_range(
+      #[case] quality: u8,
+      #[case] expected: Option<u8>,
+   ) {
+      assert_eq!(JpegQuality::new(quality).map(JpegQuality::get), expected);
    }
 
    #[test]
@@ -133,27 +138,25 @@ mod tests {
       );
    }
 
-   #[test]
-   fn quality_uses_unit_interval() {
-      for (quality, expected) in [(1, 0.01), (60, 0.6), (100, 1.0)] {
-         assert_eq!(quality_unit(JpegQuality::new(quality).unwrap()), expected);
-      }
+   #[rstest]
+   #[case::minimum(1, 0.01)]
+   #[case::thumbnail_default(60, 0.6)]
+   #[case::maximum(100, 1.0)]
+   fn quality_uses_unit_interval(#[case] quality: u8, #[case] expected: f32) {
+      assert_eq!(quality_unit(JpegQuality::new(quality).unwrap()), expected);
    }
 
-   #[test]
-   fn encoder_rejects_invalid_rgb() {
-      for (width, height, len) in [
-         (0, 1, 0),
-         (1, 0, 0),
-         (1, 1, 2),
-         (1, 1, 4),
-         (usize::MAX, 1, 3),
-      ] {
-         assert!(matches!(
-            encode_jpeg(&mut vec![0; len], width, height, JpegQuality::default()),
-            Err(JpegError::Encode(_))
-         ));
-      }
+   #[rstest]
+   #[case::zero_width(0, 1, 0)]
+   #[case::zero_height(1, 0, 0)]
+   #[case::short_buffer(1, 1, 2)]
+   #[case::long_buffer(1, 1, 4)]
+   #[case::width_past_u16(usize::MAX, 1, 3)]
+   fn encoder_rejects_invalid_rgb(#[case] width: usize, #[case] height: usize, #[case] len: usize) {
+      assert!(matches!(
+         encode_jpeg(&mut vec![0; len], width, height, JpegQuality::default()),
+         Err(JpegError::Encode(_))
+      ));
    }
 }
 

@@ -225,73 +225,66 @@ pub const fn frame_size(
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
 
-   #[test]
-   fn test_bitrate_v1_l3() {
-      assert_eq!(bitrate_kbps(MpegVersion::V1, MpegLayer::Layer3, 0), None);
+   #[rstest]
+   #[case::index_0_free(0, None)]
+   #[case::index_1(1, Some(32))]
+   #[case::index_9(9, Some(128))]
+   #[case::index_14(14, Some(320))]
+   #[case::index_15_bad(15, None)]
+   fn test_bitrate_v1_l3(#[case] index: u8, #[case] expected: Option<u16>) {
       assert_eq!(
-         bitrate_kbps(MpegVersion::V1, MpegLayer::Layer3, 1),
-         Some(32)
-      );
-      assert_eq!(
-         bitrate_kbps(MpegVersion::V1, MpegLayer::Layer3, 9),
-         Some(128)
-      );
-      assert_eq!(
-         bitrate_kbps(MpegVersion::V1, MpegLayer::Layer3, 14),
-         Some(320)
-      );
-      assert_eq!(bitrate_kbps(MpegVersion::V1, MpegLayer::Layer3, 15), None);
-   }
-
-   #[test]
-   fn test_bitrate_v2_l3() {
-      assert_eq!(
-         bitrate_kbps(MpegVersion::V2, MpegLayer::Layer3, 5),
-         Some(40)
-      );
-      assert_eq!(
-         bitrate_kbps(MpegVersion::V25, MpegLayer::Layer3, 5),
-         Some(40)
+         bitrate_kbps(MpegVersion::V1, MpegLayer::Layer3, index),
+         expected
       );
    }
 
-   #[test]
-   fn test_sample_rate() {
-      assert_eq!(sample_rate_hz(MpegVersion::V1, 0), Some(44100));
-      assert_eq!(sample_rate_hz(MpegVersion::V1, 1), Some(48000));
-      assert_eq!(sample_rate_hz(MpegVersion::V1, 2), Some(32000));
-      assert_eq!(sample_rate_hz(MpegVersion::V1, 3), None);
-
-      assert_eq!(sample_rate_hz(MpegVersion::V2, 0), Some(22050));
-      assert_eq!(sample_rate_hz(MpegVersion::V25, 0), Some(11025));
+   #[rstest]
+   #[case::v2(MpegVersion::V2)]
+   #[case::v25(MpegVersion::V25)]
+   fn test_bitrate_v2_l3(#[case] version: MpegVersion) {
+      assert_eq!(bitrate_kbps(version, MpegLayer::Layer3, 5), Some(40));
    }
 
-   #[test]
-   fn test_samples_per_frame() {
-      assert_eq!(samples_per_frame(MpegVersion::V1, MpegLayer::Layer1), 384);
-      assert_eq!(samples_per_frame(MpegVersion::V1, MpegLayer::Layer3), 1152);
-      assert_eq!(samples_per_frame(MpegVersion::V2, MpegLayer::Layer3), 576);
+   #[rstest]
+   #[case::v1_index_0(MpegVersion::V1, 0, Some(44100))]
+   #[case::v1_index_1(MpegVersion::V1, 1, Some(48000))]
+   #[case::v1_index_2(MpegVersion::V1, 2, Some(32000))]
+   #[case::v1_index_3_reserved(MpegVersion::V1, 3, None)]
+   #[case::v2_index_0(MpegVersion::V2, 0, Some(22050))]
+   #[case::v25_index_0(MpegVersion::V25, 0, Some(11025))]
+   fn test_sample_rate(
+      #[case] version: MpegVersion,
+      #[case] index: u8,
+      #[case] expected: Option<u32>,
+   ) {
+      assert_eq!(sample_rate_hz(version, index), expected);
    }
 
-   #[test]
-   fn test_frame_size() {
-      // MPEG1 Layer3, 128kbps, 44100Hz, no padding = 417 bytes
-      assert_eq!(
-         frame_size(MpegVersion::V1, MpegLayer::Layer3, 128, 44100, false),
-         Some(417)
-      );
+   #[rstest]
+   #[case::v1_layer1(MpegVersion::V1, MpegLayer::Layer1, 384)]
+   #[case::v1_layer3(MpegVersion::V1, MpegLayer::Layer3, 1152)]
+   #[case::v2_layer3(MpegVersion::V2, MpegLayer::Layer3, 576)]
+   fn test_samples_per_frame(
+      #[case] version: MpegVersion,
+      #[case] layer: MpegLayer,
+      #[case] expected: u32,
+   ) {
+      assert_eq!(samples_per_frame(version, layer), expected);
+   }
 
-      // MPEG1 Layer3, 128kbps, 44100Hz, with padding = 418 bytes
+   #[rstest]
+   // MPEG1 Layer3, 128kbps, 44100Hz, no padding = 417 bytes
+   #[case::kbps_128_no_padding(128, false, Some(417))]
+   // MPEG1 Layer3, 128kbps, 44100Hz, with padding = 418 bytes
+   #[case::kbps_128_with_padding(128, true, Some(418))]
+   // MPEG1 Layer3, 320kbps, 44100Hz, no padding = 1044 bytes
+   #[case::kbps_320_no_padding(320, false, Some(1044))]
+   fn test_frame_size(#[case] kbps: u16, #[case] padding: bool, #[case] expected: Option<usize>) {
       assert_eq!(
-         frame_size(MpegVersion::V1, MpegLayer::Layer3, 128, 44100, true),
-         Some(418)
-      );
-
-      // MPEG1 Layer3, 320kbps, 44100Hz, no padding = 1044 bytes
-      assert_eq!(
-         frame_size(MpegVersion::V1, MpegLayer::Layer3, 320, 44100, false),
-         Some(1044)
+         frame_size(MpegVersion::V1, MpegLayer::Layer3, kbps, 44100, padding),
+         expected
       );
    }
 }

@@ -335,127 +335,155 @@ impl PumpProgress {
 mod tests {
    use super::*;
    use crate::decoders::h264::{DecodeError, FrameToken};
+   use rstest::rstest;
+
+   const VALID_APERTURE: Aperture = Aperture {
+      x: FixedOffset { value: 0, fract: 0 },
+      y: FixedOffset { value: 0, fract: 0 },
+      width: 16,
+      height: 16,
+   };
+   const GREATEST_STRIDE_BELOW_LIMIT: usize = (MAX_DECODED_NV12_BYTES - 1) / 3;
+   const NEAR_LIMIT: usize = MAX_DECODED_NV12_BYTES / 2 + 1;
 
    #[test]
    fn frame_tokens_round_trip_through_media_foundation_time() {
       let timestamp = token_to_timestamp(FrameToken::new(7)).expect("token fits");
       assert_eq!(timestamp, 70_000);
       assert_eq!(timestamp_to_token(timestamp), Ok(FrameToken::new(7)));
+   }
+
+   #[test]
+   fn rejects_tokens_that_overflow_media_foundation_time() {
       assert!(token_to_timestamp(FrameToken::new(u64::MAX)).is_err());
+   }
+
+   #[rstest]
+   #[case::negative(-1)]
+   #[case::outside_the_token_scale(10_001)]
+   fn rejects_negative_or_off_scale_media_foundation_time(#[case] timestamp: i64) {
       assert!(matches!(
-         timestamp_to_token(-1),
-         Err(DecodeError::BackendContract(_))
-      ));
-      assert!(matches!(
-         timestamp_to_token(10_001),
+         timestamp_to_token(timestamp),
          Err(DecodeError::BackendContract(_))
       ));
    }
 
-   #[test]
-   fn validates_absent_and_exact_display_apertures() {
-      assert_eq!(
-         crop_from_aperture(1920, 1088, None),
-         Ok(crate::decoders::h264::frame::Crop {
-            x: 0,
-            y: 0,
-            width: 1920,
-            height: 1088,
-         })
-      );
-      assert_eq!(
-         crop_from_aperture(
-            1920,
-            1088,
-            Some(Aperture {
-               x: FixedOffset { value: 0, fract: 0 },
-               y: FixedOffset { value: 0, fract: 0 },
-               width: 1920,
-               height: 1080,
-            }),
-         ),
-         Ok(crate::decoders::h264::frame::Crop {
-            x: 0,
-            y: 0,
-            width: 1920,
-            height: 1080,
-         })
-      );
-   }
-
-   #[test]
-   fn rejects_fractional_negative_odd_and_out_of_bounds_apertures() {
-      let valid = Aperture {
+   #[rstest]
+   #[case::absent(
+      None,
+      crate::decoders::h264::frame::Crop {
+         x: 0,
+         y: 0,
+         width: 1920,
+         height: 1088,
+      }
+   )]
+   #[case::exact(
+      Some(Aperture {
          x: FixedOffset { value: 0, fract: 0 },
          y: FixedOffset { value: 0, fract: 0 },
-         width: 16,
-         height: 16,
-      };
-      let invalid = [
-         Aperture {
-            x: FixedOffset {
-               fract: 1,
-               ..valid.x
-            },
-            ..valid
-         },
-         Aperture {
-            x: FixedOffset {
-               value: -1,
-               fract: 0,
-            },
-            ..valid
-         },
-         Aperture {
-            x: FixedOffset { value: 1, fract: 0 },
-            ..valid
-         },
-         Aperture { width: 17, ..valid },
-         Aperture { height: 0, ..valid },
-      ];
-      for aperture in invalid {
-         assert!(crop_from_aperture(16, 16, Some(aperture)).is_err());
+         width: 1920,
+         height: 1080,
+      }),
+      crate::decoders::h264::frame::Crop {
+         x: 0,
+         y: 0,
+         width: 1920,
+         height: 1080,
       }
+   )]
+   fn validates_absent_and_exact_display_apertures(
+      #[case] aperture: Option<Aperture>,
+      #[case] expected: crate::decoders::h264::frame::Crop,
+   ) {
+      assert_eq!(crop_from_aperture(1920, 1088, aperture), Ok(expected));
+   }
+
+   #[rstest]
+   #[case::fractional_x(Aperture {
+      x: FixedOffset {
+         fract: 1,
+         ..VALID_APERTURE.x
+      },
+      ..VALID_APERTURE
+   })]
+   #[case::negative_x(Aperture {
+      x: FixedOffset {
+         value: -1,
+         fract: 0,
+      },
+      ..VALID_APERTURE
+   })]
+   #[case::odd_x(Aperture {
+      x: FixedOffset { value: 1, fract: 0 },
+      ..VALID_APERTURE
+   })]
+   #[case::width_past_the_coded_edge(Aperture { width: 17, ..VALID_APERTURE })]
+   #[case::zero_height(Aperture { height: 0, ..VALID_APERTURE })]
+   fn rejects_fractional_negative_odd_and_out_of_bounds_apertures(#[case] aperture: Aperture) {
+      assert!(crop_from_aperture(16, 16, Some(aperture)).is_err());
    }
 
    #[test]
-   fn computes_nv12_regions_and_rejects_short_or_odd_surfaces() {
+   fn computes_nv12_regions_of_a_valid_surface() {
       let layout = nv12_layout(1920, 1088, 1920, 3_133_440).expect("valid NV12");
       assert_eq!(layout.y_bytes, 2_088_960);
       assert_eq!(layout.total_bytes, 3_133_440);
-      assert!(nv12_layout(1919, 1088, 1919, usize::MAX).is_err());
-      assert!(nv12_layout(1920, 1087, 1920, usize::MAX).is_err());
-      assert!(nv12_layout(1920, 1088, 1920, 3_133_439).is_err());
-      assert!(nv12_layout(usize::MAX - 1, 2, usize::MAX - 1, usize::MAX).is_err());
+   }
+
+   #[rstest]
+   #[case::odd_width(1919, 1088, 1919, usize::MAX)]
+   #[case::odd_height(1920, 1087, 1920, usize::MAX)]
+   #[case::short_surface(1920, 1088, 1920, 3_133_439)]
+   #[case::near_usize_max_width(usize::MAX - 1, 2, usize::MAX - 1, usize::MAX)]
+   fn rejects_odd_short_or_oversized_nv12_surfaces(
+      #[case] width: usize,
+      #[case] height: usize,
+      #[case] stride: usize,
+      #[case] contiguous_length: usize,
+   ) {
+      assert!(nv12_layout(width, height, stride, contiguous_length).is_err());
+   }
+
+   #[rstest]
+   #[case::width_at_limit(16_384, 2, 16_384, MAX_DECODED_NV12_BYTES)]
+   #[case::buffer_at_limit(2, 2, 2, MAX_DECODED_NV12_BYTES)]
+   #[case::stride_below_byte_limit(2, 2, GREATEST_STRIDE_BELOW_LIMIT, MAX_DECODED_NV12_BYTES)]
+   fn accepts_nv12_layouts_within_the_resource_limits(
+      #[case] width: usize,
+      #[case] height: usize,
+      #[case] stride: usize,
+      #[case] contiguous_length: usize,
+   ) {
+      assert!(nv12_layout(width, height, stride, contiguous_length).is_ok());
    }
 
    #[test]
-   fn enforces_nv12_resource_limits() {
-      assert!(nv12_layout(16_384, 2, 16_384, MAX_DECODED_NV12_BYTES).is_ok());
+   fn rejects_nv12_widths_over_the_dimension_limit() {
       assert!(matches!(
          nv12_layout(16_386, 2, 16_386, MAX_DECODED_NV12_BYTES),
          Err(DecodeError::ResourceLimit(_))
       ));
+   }
 
-      assert_eq!(validate_contiguous_length(MAX_DECODED_NV12_BYTES), Ok(()));
+   #[test]
+   fn rejects_nv12_strides_over_the_byte_limit() {
       assert!(matches!(
-         validate_contiguous_length(MAX_DECODED_NV12_BYTES + 1),
+         nv12_layout(2, 2, GREATEST_STRIDE_BELOW_LIMIT + 1, usize::MAX),
          Err(DecodeError::ResourceLimit(_))
       ));
-      assert!(nv12_layout(2, 2, 2, MAX_DECODED_NV12_BYTES).is_ok());
+   }
 
-      let greatest_stride_below_limit = (MAX_DECODED_NV12_BYTES - 1) / 3;
-      assert_eq!(greatest_stride_below_limit * 3, MAX_DECODED_NV12_BYTES - 1);
-      assert!(nv12_layout(2, 2, greatest_stride_below_limit, MAX_DECODED_NV12_BYTES,).is_ok());
-      assert!(matches!(
-         nv12_layout(2, 2, greatest_stride_below_limit + 1, usize::MAX,),
-         Err(DecodeError::ResourceLimit(_))
-      ));
-
+   #[test]
+   fn rejects_nv12_layouts_whose_length_overflows() {
       assert!(matches!(
          nv12_layout(2, 2, usize::MAX, usize::MAX),
          Err(DecodeError::UnsupportedFormat(_))
       ));
+   }
+
+   #[test]
+   fn rejects_nv12_buffers_shorter_than_the_layout() {
       assert!(matches!(
          nv12_layout(2, 2, 2, 5),
          Err(DecodeError::UnsupportedFormat(_))
@@ -463,17 +491,42 @@ mod tests {
    }
 
    #[test]
-   fn plans_bounded_output_copy_capacity() {
-      assert_eq!(output_copy_capacity_target(0, 4096), Ok(Some(4096)));
-      assert_eq!(output_copy_capacity_target(4096, 4096), Ok(None));
-      assert_eq!(output_copy_capacity_target(4096, 2048), Ok(None));
-      assert_eq!(output_copy_capacity_target(4096, 4097), Ok(Some(8192)));
+   fn greatest_stride_below_limit_spans_three_rows_one_byte_under_the_limit() {
+      assert_eq!(GREATEST_STRIDE_BELOW_LIMIT * 3, MAX_DECODED_NV12_BYTES - 1);
+   }
 
-      let near_limit = MAX_DECODED_NV12_BYTES / 2 + 1;
+   #[test]
+   fn contiguous_length_limit_is_inclusive() {
+      assert_eq!(validate_contiguous_length(MAX_DECODED_NV12_BYTES), Ok(()));
+   }
+
+   #[test]
+   fn rejects_contiguous_lengths_over_the_limit() {
+      assert!(matches!(
+         validate_contiguous_length(MAX_DECODED_NV12_BYTES + 1),
+         Err(DecodeError::ResourceLimit(_))
+      ));
+   }
+
+   #[rstest]
+   #[case::first_allocation(0, 4096, Some(4096))]
+   #[case::same_length(4096, 4096, None)]
+   #[case::shorter_length(4096, 2048, None)]
+   #[case::doubles_to_grow(4096, 4097, Some(8192))]
+   #[case::doubling_capped_at_limit(NEAR_LIMIT, NEAR_LIMIT + 1, Some(MAX_DECODED_NV12_BYTES))]
+   fn plans_bounded_output_copy_capacity(
+      #[case] current_capacity: usize,
+      #[case] required_len: usize,
+      #[case] expected: Option<usize>,
+   ) {
       assert_eq!(
-         output_copy_capacity_target(near_limit, near_limit + 1),
-         Ok(Some(MAX_DECODED_NV12_BYTES))
+         output_copy_capacity_target(current_capacity, required_len),
+         Ok(expected)
       );
+   }
+
+   #[test]
+   fn rejects_output_copy_capacity_over_the_limit() {
       assert!(matches!(
          output_copy_capacity_target(0, MAX_DECODED_NV12_BYTES + 1),
          Err(DecodeError::ResourceLimit(_))
@@ -507,42 +560,58 @@ mod tests {
       assert!(validate_caller_buffer(100, 120, 110, 16).is_err());
    }
 
-   #[test]
-   fn rejects_nonzero_process_output_call_status() {
-      assert_eq!(validate_process_output_status(0, false), Ok(()));
-      assert_eq!(validate_process_output_status(0x100, true), Ok(()));
+   #[rstest]
+   #[case::success(0, false)]
+   #[case::new_streams_on_stream_change(0x100, true)]
+   fn accepts_process_output_success_or_new_streams_on_stream_change(
+      #[case] status: u32,
+      #[case] stream_change: bool,
+   ) {
+      assert_eq!(
+         validate_process_output_status(status, stream_change),
+         Ok(())
+      );
+   }
+
+   #[rstest]
+   #[case::new_streams_without_stream_change(0x100, false)]
+   #[case::unknown_status(1, true)]
+   fn rejects_nonzero_process_output_call_status(#[case] status: u32, #[case] stream_change: bool) {
       assert!(matches!(
-         validate_process_output_status(0x100, false),
-         Err(DecodeError::Backend(_))
-      ));
-      assert!(matches!(
-         validate_process_output_status(1, true),
+         validate_process_output_status(status, stream_change),
          Err(DecodeError::Backend(_))
       ));
    }
 
-   #[test]
-   fn chooses_transform_or_caller_output_allocation() {
-      assert_eq!(output_allocation(0), OutputAllocation::Caller);
-      assert_eq!(output_allocation(0x100), OutputAllocation::Transform);
-      assert_eq!(output_allocation(0x200), OutputAllocation::Transform);
-      assert_eq!(output_allocation(0x300), OutputAllocation::Transform);
+   #[rstest]
+   #[case::no_flags(0, OutputAllocation::Caller)]
+   #[case::provides_samples(0x100, OutputAllocation::Transform)]
+   #[case::can_provide_samples(0x200, OutputAllocation::Transform)]
+   #[case::both_flags(0x300, OutputAllocation::Transform)]
+   fn chooses_transform_or_caller_output_allocation(
+      #[case] flags: u32,
+      #[case] expected: OutputAllocation,
+   ) {
+      assert_eq!(output_allocation(flags), expected);
    }
 
-   #[test]
-   fn classifies_only_the_supported_output_buffer_statuses() {
-      assert_eq!(classify_output_status(0), Ok(OutputStatus::Sample));
-      assert_eq!(
-         classify_output_status(0x0100_0000),
-         Ok(OutputStatus::Incomplete)
-      );
-      assert_eq!(
-         classify_output_status(0x100),
-         Ok(OutputStatus::FormatChange)
-      );
-      assert_eq!(classify_output_status(0x300), Ok(OutputStatus::NoSample));
-      assert!(classify_output_status(0x200).is_err());
-      assert!(classify_output_status(1).is_err());
+   #[rstest]
+   #[case::sample(0, OutputStatus::Sample)]
+   #[case::incomplete(0x0100_0000, OutputStatus::Incomplete)]
+   #[case::format_change(0x100, OutputStatus::FormatChange)]
+   #[case::no_sample(0x300, OutputStatus::NoSample)]
+   fn classifies_the_supported_output_buffer_statuses(
+      #[case] status: u32,
+      #[case] expected: OutputStatus,
+   ) {
+      assert_eq!(classify_output_status(status), Ok(expected));
+   }
+
+   #[rstest]
+   #[case::stream_end(0x200)]
+   #[case::unknown_status(1)]
+   fn rejects_unsupported_output_buffer_statuses(#[case] status: u32) {
+      assert!(classify_output_status(status).is_err());
    }
 
    #[test]

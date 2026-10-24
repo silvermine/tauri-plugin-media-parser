@@ -113,100 +113,141 @@ fn encode_frame(
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
 
-   #[test]
-   fn encodes_bands_and_quality() {
-      for quality in [1, 60, 80, 100] {
-         let mut rgb = vec![0; 96 * 32 * 3];
-         for y in 0..32 {
-            for x in 0..96 {
-               rgb[(y * 96 + x) * 3 + x / 32] = 255;
-            }
+   #[rstest]
+   #[case::thumbnail_default(60)]
+   #[case::high(80)]
+   #[case::maximum(100)]
+   fn encodes_bands_and_quality(#[case] quality: u8) {
+      let mut rgb = vec![0; 96 * 32 * 3];
+      for y in 0..32 {
+         for x in 0..96 {
+            rgb[(y * 96 + x) * 3 + x / 32] = 255;
          }
-         let jpeg = super::super::encode_jpeg(&mut rgb, 96, 32, JpegQuality::new(quality).unwrap())
-            .unwrap();
-         let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(jpeg));
-         let pixels = decoder.decode().unwrap();
-         let info = decoder.info().unwrap();
-         assert_eq!((info.width, info.height), (96, 32));
-         assert_eq!(info.pixel_format, jpeg_decoder::PixelFormat::RGB24);
-         if quality >= 60 {
-            for band in 0..3 {
-               for channel in 0..3 {
-                  let expected = if band == channel { 255 } else { 0 };
-                  assert!(
-                     (i32::from(pixels[(16 * 96 + 16 + band * 32) * 3 + channel]) - expected).abs()
-                        <= 8
-                  );
-               }
-            }
+      }
+      let jpeg =
+         super::super::encode_jpeg(&mut rgb, 96, 32, JpegQuality::new(quality).unwrap()).unwrap();
+      let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(jpeg));
+      let pixels = decoder.decode().unwrap();
+      let info = decoder.info().unwrap();
+      assert_eq!((info.width, info.height), (96, 32));
+      assert_eq!(info.pixel_format, jpeg_decoder::PixelFormat::RGB24);
+      for band in 0..3 {
+         for channel in 0..3 {
+            let expected = if band == channel { 255 } else { 0 };
+            assert!(
+               (i32::from(pixels[(16 * 96 + 16 + band * 32) * 3 + channel]) - expected).abs() <= 8
+            );
          }
       }
    }
 
    #[test]
-   fn sink_failure_overrides_wic_success() {
-      for allocation in [false, true] {
-         let mut output = FallibleJpegWriter::new(if allocation {
-            super::super::MAX_JPEG_BYTES
-         } else {
-            100
-         });
-         output.fail_reserve = allocation;
-         let result = encode_jpeg(
+   fn encodes_minimum_quality() {
+      let mut rgb = vec![0; 96 * 32 * 3];
+      for y in 0..32 {
+         for x in 0..96 {
+            rgb[(y * 96 + x) * 3 + x / 32] = 255;
+         }
+      }
+      let jpeg = super::super::encode_jpeg(&mut rgb, 96, 32, JpegQuality::new(1).unwrap()).unwrap();
+      let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(jpeg));
+      decoder.decode().unwrap();
+      let info = decoder.info().unwrap();
+      assert_eq!((info.width, info.height), (96, 32));
+      assert_eq!(info.pixel_format, jpeg_decoder::PixelFormat::RGB24);
+   }
+
+   #[test]
+   fn sink_output_limit_overrides_wic_success() {
+      let result = encode_jpeg(
+         &mut [128; 96 * 32 * 3],
+         96,
+         32,
+         JpegQuality::new(80).unwrap(),
+         FallibleJpegWriter::new(100),
+      );
+      assert!(matches!(result, Err(JpegError::OutputLimit(_))));
+      let _apartment = ComApartment::enter().unwrap();
+      let state = Rc::new(RefCell::new(StreamState {
+         output: FallibleJpegWriter::new(100),
+         pos: 0,
+         calls: 0,
+      }));
+      let native = {
+         let stream: IStream = Stream(state.clone()).into();
+         encode_frame(
             &mut [128; 96 * 32 * 3],
             96,
             32,
             JpegQuality::new(80).unwrap(),
-            output,
-         );
-         assert!(if allocation {
-            matches!(result, Err(JpegError::ResourceLimit(_)))
-         } else {
-            matches!(result, Err(JpegError::OutputLimit(_)))
-         });
-         let mut output = FallibleJpegWriter::new(if allocation {
-            super::super::MAX_JPEG_BYTES
-         } else {
-            100
-         });
-         output.fail_reserve = allocation;
-         let _apartment = ComApartment::enter().unwrap();
-         let state = Rc::new(RefCell::new(StreamState {
-            output,
-            pos: 0,
-            calls: 0,
-         }));
-         let native = {
-            let stream: IStream = Stream(state.clone()).into();
-            encode_frame(
-               &mut [128; 96 * 32 * 3],
-               96,
-               32,
-               JpegQuality::new(80).unwrap(),
-               &stream,
-            )
-         };
-         assert!(
-            native.is_ok(),
-            "regression requires WIC's misleading success: {native:?}"
-         );
-         let result = Rc::try_unwrap(state)
-            .ok()
-            .unwrap()
-            .into_inner()
-            .output
-            .finish(native);
-         assert!(if allocation {
-            matches!(result, Err(JpegError::ResourceLimit(_)))
-         } else {
-            matches!(result, Err(JpegError::OutputLimit(_)))
-         });
-      }
+            &stream,
+         )
+      };
+      assert!(
+         native.is_ok(),
+         "regression requires WIC's misleading success: {native:?}"
+      );
+      let result = Rc::try_unwrap(state)
+         .ok()
+         .unwrap()
+         .into_inner()
+         .output
+         .finish(native);
+      assert!(matches!(result, Err(JpegError::OutputLimit(_))));
    }
+
+   #[test]
+   fn sink_allocation_failure_overrides_wic_success() {
+      let mut output = FallibleJpegWriter::new(super::super::MAX_JPEG_BYTES);
+      output.fail_reserve = true;
+      let result = encode_jpeg(
+         &mut [128; 96 * 32 * 3],
+         96,
+         32,
+         JpegQuality::new(80).unwrap(),
+         output,
+      );
+      assert!(matches!(result, Err(JpegError::ResourceLimit(_))));
+      let mut output = FallibleJpegWriter::new(super::super::MAX_JPEG_BYTES);
+      output.fail_reserve = true;
+      let _apartment = ComApartment::enter().unwrap();
+      let state = Rc::new(RefCell::new(StreamState {
+         output,
+         pos: 0,
+         calls: 0,
+      }));
+      let native = {
+         let stream: IStream = Stream(state.clone()).into();
+         encode_frame(
+            &mut [128; 96 * 32 * 3],
+            96,
+            32,
+            JpegQuality::new(80).unwrap(),
+            &stream,
+         )
+      };
+      assert!(
+         native.is_ok(),
+         "regression requires WIC's misleading success: {native:?}"
+      );
+      let result = Rc::try_unwrap(state)
+         .ok()
+         .unwrap()
+         .into_inner()
+         .output
+         .finish(native);
+      assert!(matches!(result, Err(JpegError::ResourceLimit(_))));
+   }
+
+   #[test]
+   fn accepts_unchanged_pixel_format() {
+      assert!(check_pixel_format(&GUID_WICPixelFormat24bppBGR).is_ok());
+   }
+
    #[test]
    fn rejects_changed_pixel_format() {
-      assert!(check_pixel_format(&GUID_WICPixelFormat24bppBGR).is_ok());
       assert!(matches!(
          check_pixel_format(&GUID_WICPixelFormat8bppGray),
          Err(JpegError::Encode(_))

@@ -22,30 +22,17 @@ pub fn detect_image_format(data: &[u8]) -> Option<PixelFormat> {
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
 
-   #[test]
-   fn test_detect_jpeg() {
-      let data = [0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10];
-      assert_eq!(detect_image_format(&data), Some(PixelFormat::Jpeg));
-   }
-
-   #[test]
-   fn test_detect_png() {
-      let data = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00];
-      assert_eq!(detect_image_format(&data), Some(PixelFormat::Png));
-   }
-
-   #[test]
-   fn test_detect_neither() {
-      let data = [0x47, 0x49, 0x46, 0x38, 0x39, 0x61];
-      assert_eq!(detect_image_format(&data), None);
-   }
-
-   #[test]
-   fn test_detect_too_short() {
-      assert_eq!(detect_image_format(&[]), None);
-      assert_eq!(detect_image_format(&[0xff]), None);
-      assert_eq!(detect_image_format(&[0xff, 0xd8]), None);
-      assert_eq!(detect_image_format(&[0x89, b'P', b'N']), None);
+   #[rstest]
+   #[case::jpeg(&[0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10], Some(PixelFormat::Jpeg))]
+   #[case::png(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00], Some(PixelFormat::Png))]
+   #[case::neither(&[0x47, 0x49, 0x46, 0x38, 0x39, 0x61], None)]
+   #[case::empty(&[], None)]
+   #[case::jpeg_one_byte(&[0xff], None)]
+   #[case::jpeg_two_bytes(&[0xff, 0xd8], None)]
+   #[case::png_three_bytes(&[0x89, b'P', b'N'], None)]
+   fn test_detect_image_format(#[case] data: &[u8], #[case] expected: Option<PixelFormat>) {
+      assert_eq!(detect_image_format(data), expected);
    }
 }

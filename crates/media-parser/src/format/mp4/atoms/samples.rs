@@ -833,6 +833,7 @@ pub fn validate_sample_tables(
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
 
    fn append_box(target: &mut Vec<u8>, fourcc: &[u8; 4], payload: &[u8]) {
       let size = u32::try_from(payload.len() + 8).expect("test box fits u32");
@@ -854,7 +855,7 @@ mod tests {
    }
 
    #[test]
-   fn bounded_stsc_and_offsets_reject_trailing_bytes() {
+   fn bounded_stsc_rejects_trailing_bytes() {
       let mut stsc = vec![0u8; 8];
       stsc[4..8].copy_from_slice(&1u32.to_be_bytes());
       stsc.extend_from_slice(&1u32.to_be_bytes());
@@ -869,13 +870,19 @@ mod tests {
          parse_stsc_bounded(&stsc, &mut retained),
          Err(TableParseError::Invalid("malformed stsc table"))
       ));
+   }
 
+   #[test]
+   fn bounded_chunk_offsets_reject_trailing_bytes() {
       let mut stco = vec![0u8; 8];
       stco[4..8].copy_from_slice(&1u32.to_be_bytes());
       stco.extend_from_slice(&100u32.to_be_bytes());
       stco.push(0);
       let mut stbl = Vec::new();
       append_box(&mut stbl, b"stco", &stco);
+      // A budget too small for a single entry separates the two orders: were
+      // the charge to precede the framing check, this would be the fatal
+      // BudgetExceeded instead of the track-local Invalid.
       let mut retained = RetainedBudget::new(0);
       assert!(matches!(
          parse_chunk_offsets_bounded(&stbl, &mut retained),
@@ -883,27 +890,26 @@ mod tests {
       ));
    }
 
-   #[test]
-   fn framing_valid_stco_accepts_exact_track_ceiling_and_rejects_one_more_entry() {
-      for count in [2u32, 3] {
-         let mut stco = vec![0u8; 4];
-         stco.extend_from_slice(&count.to_be_bytes());
-         for offset in 0..count {
-            stco.extend_from_slice(&offset.to_be_bytes());
-         }
-         let mut stbl = Vec::new();
-         append_box(&mut stbl, b"stco", &stco);
-         let mut budget = RetainedBudget::new(16);
-         budget.begin_track();
-         let result = parse_chunk_offsets_bounded(&stbl, &mut budget);
-         if count == 2 {
-            assert_eq!(result.unwrap(), vec![0, 1]);
-            assert_eq!(budget.used_bytes(), 16);
-         } else {
-            assert_eq!(result, Err(TableParseError::TrackTooLarge));
-            assert_eq!(budget.used_bytes(), 0);
-         }
+   #[rstest]
+   #[case::exact_track_ceiling(2, Ok(vec![0, 1]), 16)]
+   #[case::one_entry_over_ceiling(3, Err(TableParseError::TrackTooLarge), 0)]
+   fn framing_valid_stco_is_bounded_by_the_track_ceiling(
+      #[case] count: u32,
+      #[case] expected: TableResult<Vec<u64>>,
+      #[case] used_bytes: usize,
+   ) {
+      let mut stco = vec![0u8; 4];
+      stco.extend_from_slice(&count.to_be_bytes());
+      for offset in 0..count {
+         stco.extend_from_slice(&offset.to_be_bytes());
       }
+      let mut stbl = Vec::new();
+      append_box(&mut stbl, b"stco", &stco);
+      let mut budget = RetainedBudget::new(16);
+      budget.begin_track();
+      let result = parse_chunk_offsets_bounded(&stbl, &mut budget);
+      assert_eq!(result, expected);
+      assert_eq!(budget.used_bytes(), used_bytes);
    }
 
    #[test]
@@ -1054,40 +1060,31 @@ mod tests {
       (sizes, stsc, chunk_offsets)
    }
 
-   #[test]
-   fn range_description_index_covers_whole_range_in_one_walk() {
+   #[rstest]
+   #[case::first_description_run(1, 4, 1, true)]
+   #[case::second_description_run(5, 6, 2, true)]
+   #[case::range_spanning_both_runs(1, 6, 1, false)]
+   #[case::range_straddling_run_boundary(4, 5, 1, false)]
+   #[case::range_past_last_sample(6, 7, 2, false)]
+   #[case::zero_start_sample(0, 4, 1, false)]
+   fn range_description_index_covers_whole_range_in_one_walk(
+      #[case] start_sample: u32,
+      #[case] end_sample: u32,
+      #[case] description_index: u32,
+      #[case] uses_index: bool,
+   ) {
       let (sizes, stsc, chunk_offsets) = two_run_tables();
 
-      assert!(range_uses_description_index(1, 4, 1, &stsc, &chunk_offsets));
-      assert!(range_uses_description_index(5, 6, 2, &stsc, &chunk_offsets));
-      assert!(!range_uses_description_index(
-         1,
-         6,
-         1,
-         &stsc,
-         &chunk_offsets
-      ));
-      assert!(!range_uses_description_index(
-         4,
-         5,
-         1,
-         &stsc,
-         &chunk_offsets
-      ));
-      assert!(!range_uses_description_index(
-         6,
-         7,
-         2,
-         &stsc,
-         &chunk_offsets
-      ));
-      assert!(!range_uses_description_index(
-         0,
-         4,
-         1,
-         &stsc,
-         &chunk_offsets
-      ));
+      assert_eq!(
+         range_uses_description_index(
+            start_sample,
+            end_sample,
+            description_index,
+            &stsc,
+            &chunk_offsets
+         ),
+         uses_index
+      );
       let _ = sizes;
    }
 
@@ -1170,8 +1167,10 @@ mod tests {
       assert_eq!(entries[0].sample_description_index, 3);
    }
 
-   #[test]
-   fn locates_samples_without_iterating_every_prior_chunk() {
+   #[rstest]
+   #[case::thousandth_sample(1_000)]
+   #[case::last_sample(1_000_000_000)]
+   fn locates_samples_without_iterating_every_prior_chunk(#[case] sample_index: u32) {
       let sizes = SampleSizes::fixed(1_000_000_000, 4).unwrap();
       let stsc = [StscEntry {
          first_chunk: 1,
@@ -1181,11 +1180,7 @@ mod tests {
       let chunk_offsets = vec![0];
 
       assert_eq!(
-         sample_description_index(1_000, &sizes, &stsc, &chunk_offsets),
-         Some(1)
-      );
-      assert_eq!(
-         sample_description_index(1_000_000_000, &sizes, &stsc, &chunk_offsets),
+         sample_description_index(sample_index, &sizes, &stsc, &chunk_offsets),
          Some(1)
       );
    }

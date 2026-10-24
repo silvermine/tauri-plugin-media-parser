@@ -146,32 +146,35 @@ pub(super) fn record_hardware_acceleration(
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
    use super::*;
+   use rstest::rstest;
 
-   #[test]
-   fn hardware_property_copy_classifies_every_status_pointer_pair() {
+   #[rstest]
+   #[case::success_with_object(0, true, HardwarePropertyCopyClassification::Value)]
+   #[case::success_without_object(0, false, HardwarePropertyCopyClassification::ContractNull)]
+   #[case::unsupported_with_object(
+      kVTPropertyNotSupportedErr,
+      true,
+      HardwarePropertyCopyClassification::UnsupportedWithObject
+   )]
+   #[case::unsupported_without_object(
+      kVTPropertyNotSupportedErr,
+      false,
+      HardwarePropertyCopyClassification::Unsupported
+   )]
+   #[case::failure_with_object(
+      -12903,
+      true,
+      HardwarePropertyCopyClassification::NativeFailureWithObject
+   )]
+   #[case::failure_without_object(-12903, false, HardwarePropertyCopyClassification::NativeFailure)]
+   fn hardware_property_copy_classifies_every_status_pointer_pair(
+      #[case] status: i32,
+      #[case] pointer_present: bool,
+      #[case] expected: HardwarePropertyCopyClassification,
+   ) {
       assert_eq!(
-         classify_hardware_property_copy_result(0, true),
-         HardwarePropertyCopyClassification::Value
-      );
-      assert_eq!(
-         classify_hardware_property_copy_result(0, false),
-         HardwarePropertyCopyClassification::ContractNull
-      );
-      assert_eq!(
-         classify_hardware_property_copy_result(kVTPropertyNotSupportedErr, true),
-         HardwarePropertyCopyClassification::UnsupportedWithObject
-      );
-      assert_eq!(
-         classify_hardware_property_copy_result(kVTPropertyNotSupportedErr, false),
-         HardwarePropertyCopyClassification::Unsupported
-      );
-      assert_eq!(
-         classify_hardware_property_copy_result(-12903, true),
-         HardwarePropertyCopyClassification::NativeFailureWithObject
-      );
-      assert_eq!(
-         classify_hardware_property_copy_result(-12903, false),
-         HardwarePropertyCopyClassification::NativeFailure
+         classify_hardware_property_copy_result(status, pointer_present),
+         expected
       );
    }
 

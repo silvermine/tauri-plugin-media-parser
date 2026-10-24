@@ -503,8 +503,14 @@ pub(crate) fn decode_frames_to_jpeg_with<D: H264Decoder, S: AsRef<[u8]>>(
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
 
    use super::test_support::*;
+
+   const FULL_RANGE: GopColor = GopColor {
+      full_range: true,
+      ..GopColor::DEFAULT
+   };
 
    #[cfg(not(target_os = "android"))]
    #[test]
@@ -661,24 +667,28 @@ mod tests {
       assert_eq!(budget.used(), 0);
    }
 
-   #[test]
-   fn decoder_session_compatibility_applies_the_backend_pixel_range_policy() {
+   #[rstest]
+   #[case::matching_range_with_policy(GopColor::DEFAULT, true, true)]
+   #[case::mismatched_range_with_policy(FULL_RANGE, true, false)]
+   #[case::mismatched_range_without_policy(FULL_RANGE, false, true)]
+   fn decoder_session_compatibility_applies_the_backend_pixel_range_policy(
+      #[case] candidate: GopColor,
+      #[case] require_matching_pixel_range: bool,
+      #[case] expected: bool,
+   ) {
       let config = reusable_config(2);
       let limited = GopColor::DEFAULT;
-      let full = GopColor {
-         full_range: true,
-         ..GopColor::DEFAULT
-      };
 
-      assert!(decoder_session_compatible(
-         &config, limited, &config, limited, true
-      ));
-      assert!(!decoder_session_compatible(
-         &config, limited, &config, full, true
-      ));
-      assert!(decoder_session_compatible(
-         &config, limited, &config, full, false
-      ));
+      assert_eq!(
+         decoder_session_compatible(
+            &config,
+            limited,
+            &config,
+            candidate,
+            require_matching_pixel_range
+         ),
+         expected
+      );
    }
 
    #[cfg(not(target_os = "android"))]
@@ -749,23 +759,22 @@ mod tests {
       test_support::orchestration_returns_reordered_callbacks_in_token_order_case();
    }
 
-   #[test]
-   fn orchestration_rejects_unknown_duplicate_and_missing_tokens() {
+   #[rstest]
+   #[case::unknown_token(vec![FrameToken::new(0), FrameToken::new(2)])]
+   #[case::duplicate_token(vec![FrameToken::new(0), FrameToken::new(0)])]
+   #[case::missing_token(vec![FrameToken::new(0)])]
+   fn orchestration_rejects_unknown_duplicate_and_missing_tokens(
+      #[case] emissions: Vec<FrameToken>,
+   ) {
       let tokens = [FrameToken::new(0), FrameToken::new(1)];
       let wanted = [];
-      for emissions in [
-         vec![FrameToken::new(0), FrameToken::new(2)],
-         vec![FrameToken::new(0), FrameToken::new(0)],
-         vec![FrameToken::new(0)],
-      ] {
-         let error = fake_decode(
-            backend::fake::FakeDecoder::emitting(emissions),
-            &tokens,
-            &wanted,
-         )
-         .expect_err("backend contract violation");
-         assert!(matches!(error, DecodeError::BackendContract(_)));
-      }
+      let error = fake_decode(
+         backend::fake::FakeDecoder::emitting(emissions),
+         &tokens,
+         &wanted,
+      )
+      .expect_err("backend contract violation");
+      assert!(matches!(error, DecodeError::BackendContract(_)));
    }
 
    #[test]
@@ -821,28 +830,25 @@ mod tests {
       assert_eq!(probe.drain_calls(), 0);
    }
 
-   #[test]
-   fn orchestration_requires_tokens_to_be_an_exact_permutation() {
-      for tokens in [
-         vec![FrameToken::new(0)],
-         vec![FrameToken::new(0), FrameToken::new(0)],
-         vec![FrameToken::new(0), FrameToken::new(2)],
-      ] {
-         let samples = vec![vec![0], vec![0]];
-         let mut decoder = backend::fake::FakeDecoder::emitting(Vec::new());
-         let error = decode_frames_to_jpeg_with(
-            &mut decoder,
-            &samples,
-            &tokens,
-            &[],
-            JpegQuality::default(),
-            ThumbnailSize::default(),
-            GopColor::DEFAULT,
-            &OutputBudget::new(None),
-         )
-         .expect_err("invalid token permutation");
-         assert!(matches!(error, DecodeError::BackendContract(_)));
-      }
+   #[rstest]
+   #[case::missing_token(vec![FrameToken::new(0)])]
+   #[case::duplicate_token(vec![FrameToken::new(0), FrameToken::new(0)])]
+   #[case::out_of_range_token(vec![FrameToken::new(0), FrameToken::new(2)])]
+   fn orchestration_requires_tokens_to_be_an_exact_permutation(#[case] tokens: Vec<FrameToken>) {
+      let samples = vec![vec![0], vec![0]];
+      let mut decoder = backend::fake::FakeDecoder::emitting(Vec::new());
+      let error = decode_frames_to_jpeg_with(
+         &mut decoder,
+         &samples,
+         &tokens,
+         &[],
+         JpegQuality::default(),
+         ThumbnailSize::default(),
+         GopColor::DEFAULT,
+         &OutputBudget::new(None),
+      )
+      .expect_err("invalid token permutation");
+      assert!(matches!(error, DecodeError::BackendContract(_)));
    }
 }
 

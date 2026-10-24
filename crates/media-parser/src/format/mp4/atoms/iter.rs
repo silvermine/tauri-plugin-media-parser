@@ -77,6 +77,7 @@ pub fn iter_boxes(data: &[u8]) -> Mp4BoxIter<'_> {
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
 
    #[test]
    fn test_iter_boxes() {
@@ -105,26 +106,16 @@ mod tests {
       assert_eq!(boxes[2].0, *b"mdat");
    }
 
-   #[test]
-   fn test_iter_boxes_empty() {
-      let data = vec![0u8; 0];
+   #[rstest]
+   #[case::empty(vec![0u8; 0])]
+   // Box with size smaller than header (size < 8)
+   #[case::invalid_size([4u32.to_be_bytes(), *b"test"].concat())]
+   fn test_iter_boxes_yields_nothing(#[case] data: Vec<u8>) {
       let boxes: Vec<_> = iter_boxes(&data).collect();
       assert_eq!(boxes.len(), 0);
    }
 
-   #[test]
-   fn test_iter_boxes_invalid_size() {
-      // Box with size smaller than header
-      let mut data = Vec::new();
-      data.extend_from_slice(&4u32.to_be_bytes()); // size < 8
-      data.extend_from_slice(b"test");
-
-      let boxes: Vec<_> = iter_boxes(&data).collect();
-      assert_eq!(boxes.len(), 0);
-   }
-
-   #[test]
-   fn test_find_box() {
+   fn find_box_data() -> Vec<u8> {
       let mut data = Vec::new();
 
       // ftyp box
@@ -142,18 +133,16 @@ mod tests {
       data.extend_from_slice(b"mdat");
       data.extend_from_slice(&[3u8; 4]);
 
-      // Find moov (skips ftyp)
-      let moov = iter_boxes(&data).find_box(*b"moov");
-      assert!(moov.is_some());
-      assert_eq!(moov.unwrap(), &[2u8; 8]);
+      data
+   }
 
-      // Find ftyp (first box)
-      let ftyp = iter_boxes(&data).find_box(*b"ftyp");
-      assert!(ftyp.is_some());
-      assert_eq!(ftyp.unwrap(), &[1u8; 8]);
+   #[rstest]
+   #[case::moov_skips_ftyp(*b"moov", Some([2u8; 8].as_slice()))]
+   #[case::ftyp_first_box(*b"ftyp", Some([1u8; 8].as_slice()))]
+   #[case::non_existent_box(*b"trak", None)]
+   fn test_find_box(#[case] target: [u8; 4], #[case] expected: Option<&[u8]>) {
+      let data = find_box_data();
 
-      // Find non-existent box
-      let none = iter_boxes(&data).find_box(*b"trak");
-      assert!(none.is_none());
+      assert_eq!(iter_boxes(&data).find_box(target), expected);
    }
 }

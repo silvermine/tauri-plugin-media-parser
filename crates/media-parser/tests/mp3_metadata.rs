@@ -6,6 +6,7 @@ use media_parser::format::mp3::{
    find_first_frame, parse_vbr_header,
 };
 use media_parser::{FileStreamReader, MediaParser, PixelFormat, TrackType};
+use rstest::rstest;
 use std::io::Write;
 use std::path::PathBuf;
 fn fixtures_dir() -> PathBuf {
@@ -465,20 +466,22 @@ async fn test_vbr_mono_22050() {
    assert_eq!(dur.seconds(), 5.0);
 }
 
+#[rstest]
+#[case::stereo_44khz("stereo_cbr_192k.mp3", 2, 44_100)]
+#[case::mono_22khz("mono_vbr_22khz.mp3", 1, 22_050)]
 #[tokio::test]
-async fn test_mp3_tracks_report_channels() {
-   for (fixture, expected_channels, expected_sample_rate) in [
-      ("stereo_cbr_192k.mp3", 2, 44_100),
-      ("mono_vbr_22khz.mp3", 1, 22_050),
-   ] {
-      let reader = FileStreamReader::new(fixtures_dir().join(fixture)).expect("open fixture");
-      let tracks = MediaParser::new(reader).tracks().await.unwrap();
+async fn test_mp3_tracks_report_channels(
+   #[case] fixture: &str,
+   #[case] expected_channels: u16,
+   #[case] expected_sample_rate: u32,
+) {
+   let reader = FileStreamReader::new(fixtures_dir().join(fixture)).expect("open fixture");
+   let tracks = MediaParser::new(reader).tracks().await.unwrap();
 
-      let [TrackType::Audio(track)] = tracks.as_slice() else {
-         panic!("expected one audio track for {fixture}");
-      };
-      assert_eq!(track.base.codec, "mp3");
-      assert_eq!(track.channels, expected_channels);
-      assert_eq!(track.sample_rate, expected_sample_rate);
-   }
+   let [TrackType::Audio(track)] = tracks.as_slice() else {
+      panic!("expected one audio track for {fixture}");
+   };
+   assert_eq!(track.base.codec, "mp3");
+   assert_eq!(track.channels, expected_channels);
+   assert_eq!(track.sample_rate, expected_sample_rate);
 }

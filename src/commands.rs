@@ -357,6 +357,7 @@ impl From<TrackType> for TrackInfo {
 mod tests {
    use super::*;
    use media_parser::{AudioTrackMeta, SubtitleTrackMeta, UnknownTrackMeta, VideoTrackMeta};
+   use rstest::rstest;
 
    #[cfg(not(native_h264_backend))]
    #[tokio::test]
@@ -469,28 +470,45 @@ mod tests {
       assert_eq!(options.max_output_bytes, Some(MAX_THUMBNAIL_OUTPUT_BYTES));
    }
 
-   #[test]
    #[cfg(native_h264_backend)]
-   fn thumbnail_dimensions_are_validated_and_default_independently() {
+   #[rstest]
+   #[case::both_dimensions(
+      Some(640),
+      Some(360),
+      ThumbnailSize::new(640, 360).expect("valid size"),
+   )]
+   #[case::width_only(
+      Some(640),
+      None,
+      ThumbnailSize::new(640, u16::MAX.into()).expect("valid one-axis bounds"),
+   )]
+   fn valid_thumbnail_dimensions_become_the_size_bounds(
+      #[case] max_width: Option<u32>,
+      #[case] max_height: Option<u32>,
+      #[case] expected: ThumbnailSize,
+   ) {
       assert_eq!(
-         thumbnail_options(None, Some(640), Some(360))
+         thumbnail_options(None, max_width, max_height)
             .expect("valid dimensions")
             .size,
-         ThumbnailSize::new(640, 360).expect("valid size")
+         expected
       );
-      assert_eq!(
-         thumbnail_options(None, Some(640), None)
-            .expect("one dimension leaves the other unconstrained")
-            .size,
-         ThumbnailSize::new(640, u16::MAX.into()).expect("valid one-axis bounds")
-      );
-      assert!(thumbnail_options(None, Some(0), None).is_err());
-      assert!(thumbnail_options(None, None, Some(65_536)).is_err());
+   }
+
+   #[cfg(native_h264_backend)]
+   #[rstest]
+   #[case::zero_width(Some(0), None)]
+   #[case::height_above_u16(None, Some(65_536))]
+   fn thumbnail_dimensions_outside_1_to_65535_are_rejected(
+      #[case] max_width: Option<u32>,
+      #[case] max_height: Option<u32>,
+   ) {
+      assert!(thumbnail_options(None, max_width, max_height).is_err());
    }
 
    #[test]
    #[cfg(native_h264_backend)]
-   fn thumbnail_quality_is_rejected_outside_the_encoder_range() {
+   fn thumbnail_quality_inside_the_encoder_range_is_accepted() {
       assert_eq!(
          thumbnail_options(Some(80), None, None)
             .expect("80 is in range")
@@ -498,17 +516,22 @@ mod tests {
             .get(),
          80
       );
+   }
 
-      for quality in [0u8, 101, 255] {
-         let error = thumbnail_options(Some(quality), None, None)
-            .expect_err("quality outside 1-100 must not reach the encoder")
-            .to_string();
+   #[cfg(native_h264_backend)]
+   #[rstest]
+   #[case::zero(0)]
+   #[case::above_100(101)]
+   #[case::u8_max(255)]
+   fn thumbnail_quality_is_rejected_outside_the_encoder_range(#[case] quality: u8) {
+      let error = thumbnail_options(Some(quality), None, None)
+         .expect_err("quality outside 1-100 must not reach the encoder")
+         .to_string();
 
-         assert!(
-            error.contains("between 1 and 100"),
-            "unexpected error for quality {quality}: {error}"
-         );
-      }
+      assert!(
+         error.contains("between 1 and 100"),
+         "unexpected error for quality {quality}: {error}"
+      );
    }
 
    #[test]
@@ -677,75 +700,77 @@ mod tests {
       assert!(frames.is_empty());
    }
 
-   #[test]
-   fn serializes_track_type_contract() {
-      let tracks = [
-         TrackType::Video(VideoTrackMeta {
-            base: base_track(1, "avc1"),
-            width: 1_920,
-            height: 1_080,
-            frame_rate: Some((30_000, 1001)),
-         }),
-         TrackType::Audio(AudioTrackMeta {
-            base: base_track(2, "mp4a"),
-            channels: 2,
-            sample_rate: 48_000,
-         }),
-         TrackType::Subtitle(SubtitleTrackMeta {
-            base: base_track(3, "tx3g"),
-         }),
-         TrackType::Unknown(UnknownTrackMeta {
-            base: base_track(4, "meta"),
-         }),
-      ];
+   #[rstest]
+   #[case::video(
+      TrackType::Video(VideoTrackMeta {
+         base: base_track(1, "avc1"),
+         width: 1_920,
+         height: 1_080,
+         frame_rate: Some((30_000, 1001)),
+      }),
+      serde_json::json!({
+         "kind": "video",
+         "id": 1,
+         "codec": "avc1",
+         "timescale": 1_000,
+         "duration": 2_000,
+         "properties": {},
+         "width": 1_920,
+         "height": 1_080,
+         "frameRate": "30000/1001",
+      }),
+   )]
+   #[case::audio(
+      TrackType::Audio(AudioTrackMeta {
+         base: base_track(2, "mp4a"),
+         channels: 2,
+         sample_rate: 48_000,
+      }),
+      serde_json::json!({
+         "kind": "audio",
+         "id": 2,
+         "codec": "mp4a",
+         "timescale": 1_000,
+         "duration": 2_000,
+         "properties": {},
+         "channels": 2,
+         "sampleRate": 48_000,
+      }),
+   )]
+   #[case::subtitle(
+      TrackType::Subtitle(SubtitleTrackMeta {
+         base: base_track(3, "tx3g"),
+      }),
+      serde_json::json!({
+         "kind": "subtitle",
+         "id": 3,
+         "codec": "tx3g",
+         "timescale": 1_000,
+         "duration": 2_000,
+         "properties": {},
+      }),
+   )]
+   #[case::unknown(
+      TrackType::Unknown(UnknownTrackMeta {
+         base: base_track(4, "meta"),
+      }),
+      serde_json::json!({
+         "kind": "unknown",
+         "id": 4,
+         "codec": "meta",
+         "timescale": 1_000,
+         "duration": 2_000,
+         "properties": {},
+      }),
+   )]
+   fn serializes_track_type_contract(
+      #[case] track: TrackType,
+      #[case] expected: serde_json::Value,
+   ) {
+      let serialized =
+         serde_json::to_value(TrackInfo::from(track)).expect("track should serialize");
 
-      let serialized = tracks
-         .into_iter()
-         .map(|track| serde_json::to_value(TrackInfo::from(track)).expect("track should serialize"))
-         .collect::<Vec<_>>();
-
-      assert_eq!(
-         serialized,
-         vec![
-            serde_json::json!({
-               "kind": "video",
-               "id": 1,
-               "codec": "avc1",
-               "timescale": 1_000,
-               "duration": 2_000,
-               "properties": {},
-               "width": 1_920,
-               "height": 1_080,
-               "frameRate": "30000/1001",
-            }),
-            serde_json::json!({
-               "kind": "audio",
-               "id": 2,
-               "codec": "mp4a",
-               "timescale": 1_000,
-               "duration": 2_000,
-               "properties": {},
-               "channels": 2,
-               "sampleRate": 48_000,
-            }),
-            serde_json::json!({
-               "kind": "subtitle",
-               "id": 3,
-               "codec": "tx3g",
-               "timescale": 1_000,
-               "duration": 2_000,
-               "properties": {},
-            }),
-            serde_json::json!({
-               "kind": "unknown",
-               "id": 4,
-               "codec": "meta",
-               "timescale": 1_000,
-               "duration": 2_000,
-               "properties": {},
-            }),
-         ]
-      );
+      assert_eq!(serialized, expected);
    }
 
    #[test]

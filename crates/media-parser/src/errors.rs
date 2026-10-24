@@ -67,31 +67,22 @@ pub type Result<T> = std::result::Result<T, MediaParserError>;
 #[cfg(test)]
 mod tests {
    use super::MediaParserError;
+   use rstest::rstest;
 
-   #[test]
-   fn renders_decode_errors_separately_from_unsupported_codecs() {
-      let error = MediaParserError::Decode("native decoder stopped".to_string());
-
-      assert_eq!(error.to_string(), "Decoder error: native decoder stopped");
-   }
-
-   #[test]
-   fn renders_output_limits_as_user_adjustable_limits() {
-      let error = MediaParserError::OutputLimit("thumbnail payload is too large".to_string());
-
-      assert_eq!(
-         error.to_string(),
-         "Output limit exceeded: thumbnail payload is too large"
-      );
-   }
-
-   #[test]
-   fn renders_resource_limits_separately_from_output_limits() {
-      let error = MediaParserError::ResourceLimit("allocation failed".to_string());
-
-      assert_eq!(
-         error.to_string(),
-         "Resource limit reached: allocation failed"
-      );
+   #[rstest]
+   #[case::decode_separately_from_unsupported_codec(
+      MediaParserError::Decode("native decoder stopped".to_string()),
+      "Decoder error: native decoder stopped"
+   )]
+   #[case::output_limit_as_user_adjustable_limit(
+      MediaParserError::OutputLimit("thumbnail payload is too large".to_string()),
+      "Output limit exceeded: thumbnail payload is too large"
+   )]
+   #[case::resource_limit_separately_from_output_limit(
+      MediaParserError::ResourceLimit("allocation failed".to_string()),
+      "Resource limit reached: allocation failed"
+   )]
+   fn renders_error_category_messages(#[case] error: MediaParserError, #[case] expected: &str) {
+      assert_eq!(error.to_string(), expected);
    }
 }

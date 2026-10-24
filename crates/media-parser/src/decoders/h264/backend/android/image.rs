@@ -216,6 +216,8 @@ pub(super) fn timestamp_to_token(timestamp: i64) -> Result<FrameToken, DecodeErr
 #[cfg(test)]
 mod tests {
    use super::*;
+   use crate::decoders::h264::frame::MAX_DECODED_NV12_DIMENSION;
+   use rstest::rstest;
 
    fn put_u32(blob: &mut [u8], offset: usize, value: u32) {
       blob[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
@@ -255,15 +257,21 @@ mod tests {
       blob
    }
 
-   #[test]
-   fn parses_exact_and_extended_media_image2_blobs() {
-      for extra_bytes in [0, 16] {
-         let parsed = parse_media_image2(&image_blob(extra_bytes)).expect("valid MediaImage2");
-         assert_eq!(parsed.coded_width, 4);
-         assert_eq!(parsed.coded_height, 2);
-         assert_eq!(parsed.planes[1].offset, 8);
-         assert_eq!(parsed.planes[2].pixel_stride, 2);
-      }
+   fn image_blob_with_u32(offset: usize, value: u32) -> Vec<u8> {
+      let mut blob = image_blob(0);
+      put_u32(&mut blob, offset, value);
+      blob
+   }
+
+   #[rstest]
+   #[case::exact(0)]
+   #[case::extended(16)]
+   fn parses_exact_and_extended_media_image2_blobs(#[case] extra_bytes: usize) {
+      let parsed = parse_media_image2(&image_blob(extra_bytes)).expect("valid MediaImage2");
+      assert_eq!(parsed.coded_width, 4);
+      assert_eq!(parsed.coded_height, 2);
+      assert_eq!(parsed.planes[1].offset, 8);
+      assert_eq!(parsed.planes[2].pixel_stride, 2);
    }
 
    #[test]
@@ -278,41 +286,47 @@ mod tests {
       );
    }
 
-   #[test]
-   fn limits_media_image2_coded_dimensions() {
-      for offset in [8, 12] {
-         let mut at_limit = image_blob(0);
-         put_u32(
-            &mut at_limit,
-            offset,
-            u32::try_from(crate::decoders::h264::frame::MAX_DECODED_NV12_DIMENSION)
-               .expect("dimension limit fits u32"),
-         );
-         assert!(parse_media_image2(&at_limit).is_ok());
+   #[rstest]
+   #[case::width(8)]
+   #[case::height(12)]
+   fn accepts_media_image2_coded_dimensions_at_the_limit(#[case] offset: usize) {
+      let mut at_limit = image_blob(0);
+      put_u32(
+         &mut at_limit,
+         offset,
+         u32::try_from(MAX_DECODED_NV12_DIMENSION).expect("dimension limit fits u32"),
+      );
+      assert!(parse_media_image2(&at_limit).is_ok());
+   }
 
-         let mut above_limit = image_blob(0);
-         put_u32(
-            &mut above_limit,
-            offset,
-            u32::try_from(crate::decoders::h264::frame::MAX_DECODED_NV12_DIMENSION + 1)
-               .expect("dimension limit fits u32"),
-         );
-         assert!(matches!(
-            parse_media_image2(&above_limit),
-            Err(DecodeError::ResourceLimit(_))
-         ));
-      }
+   #[rstest]
+   #[case::width(8)]
+   #[case::height(12)]
+   fn rejects_media_image2_coded_dimensions_above_the_limit(#[case] offset: usize) {
+      let mut above_limit = image_blob(0);
+      put_u32(
+         &mut above_limit,
+         offset,
+         u32::try_from(MAX_DECODED_NV12_DIMENSION + 1).expect("dimension limit fits u32"),
+      );
+      assert!(matches!(
+         parse_media_image2(&above_limit),
+         Err(DecodeError::ResourceLimit(_))
+      ));
    }
 
    #[test]
-   fn rejects_short_or_incompatible_media_image2_blobs() {
+   fn rejects_media_image2_blobs_shorter_than_the_struct() {
       let short = vec![0; MEDIA_IMAGE2_BYTES - 1];
       assert!(matches!(
          parse_media_image2(&short),
          Err(DecodeError::UnsupportedFormat(message))
             if message.contains("smaller than MediaImage2")
       ));
+   }
 
+   #[test]
+   fn rejects_media_image2_blobs_whose_image_type_is_not_yuv() {
       let mut wrong_type = image_blob(0);
       put_u32(&mut wrong_type, 0, 3);
       assert!(matches!(
@@ -320,20 +334,32 @@ mod tests {
          Err(DecodeError::UnsupportedFormat(message))
             if message.contains("incompatible MediaImage2")
       ));
+   }
 
-      for (offset, value) in [(4, 4), (8, 0), (12, 0), (16, 10), (20, 16)] {
-         let mut invalid = image_blob(0);
-         put_u32(&mut invalid, offset, value);
-         assert!(parse_media_image2(&invalid).is_err(), "field at {offset}");
-      }
-      for (offset, value) in [(28, 0), (32, -1), (48, -1), (72, 0)] {
-         let mut invalid = image_blob(0);
-         put_i32(&mut invalid, offset, value);
-         assert!(parse_media_image2(&invalid).is_err(), "field at {offset}");
-      }
-      let mut invalid_subsampling = image_blob(0);
-      put_u32(&mut invalid_subsampling, 56, 1);
-      assert!(parse_media_image2(&invalid_subsampling).is_err());
+   #[rstest]
+   #[case::four_planes(4, 4)]
+   #[case::zero_width(8, 0)]
+   #[case::zero_height(12, 0)]
+   #[case::ten_bit_depth(16, 10)]
+   #[case::sixteen_bit_allocation(20, 16)]
+   #[case::u_not_subsampled(56, 1)]
+   fn rejects_unsupported_media_image2_u32_fields(#[case] offset: usize, #[case] value: u32) {
+      let invalid = image_blob_with_u32(offset, value);
+      assert!(parse_media_image2(&invalid).is_err(), "field at {offset}");
+   }
+
+   #[rstest]
+   #[case::zero_y_column_increment(28, 0)]
+   #[case::negative_y_row_increment(32, -1)]
+   #[case::negative_u_column_increment(48, -1)]
+   #[case::zero_v_row_increment(72, 0)]
+   fn rejects_non_positive_media_image2_plane_increments(
+      #[case] offset: usize,
+      #[case] value: i32,
+   ) {
+      let mut invalid = image_blob(0);
+      put_i32(&mut invalid, offset, value);
+      assert!(parse_media_image2(&invalid).is_err(), "field at {offset}");
    }
 
    #[test]
@@ -354,7 +380,7 @@ mod tests {
    }
 
    #[test]
-   fn represents_i420_and_nv21_by_plane_offsets_and_strides() {
+   fn represents_i420_by_plane_offsets_and_strides() {
       let buffer = [81, 81, 81, 81, 81, 81, 81, 81, 90, 90, 240, 240];
       let crop = Crop {
          x: 0,
@@ -373,7 +399,17 @@ mod tests {
       assert_eq!(planar.u.data, &buffer[8..]);
       assert_eq!(planar.v.data, &buffer[10..]);
       assert_eq!(planar.u.pixel_stride, 1);
+   }
 
+   #[test]
+   fn represents_nv21_by_plane_offsets_and_strides() {
+      let buffer = [81, 81, 81, 81, 81, 81, 81, 81, 90, 90, 240, 240];
+      let crop = Crop {
+         x: 0,
+         y: 0,
+         width: 4,
+         height: 2,
+      };
       let mut nv21 = image_blob(0);
       put_u32(&mut nv21, 44, 9);
       put_u32(&mut nv21, 64, 8);
@@ -384,11 +420,13 @@ mod tests {
       assert_eq!(planar.v.pixel_stride, 2);
    }
 
-   #[test]
-   fn converts_inclusive_crop_edges_and_defaults_to_the_full_image() {
+   #[rstest]
+   #[case::inclusive_edges([Some(0), Some(0), Some(3), Some(1)])]
+   #[case::no_edges([None, None, None, None])]
+   fn crop_edges_resolve_to_the_full_image(#[case] edges: [Option<i32>; 4]) {
       let image = parse_media_image2(&image_blob(0)).expect("valid image");
       assert_eq!(
-         crop_from_edges(image, [Some(0), Some(0), Some(3), Some(1)]).expect("inclusive crop"),
+         crop_from_edges(image, edges).expect("valid crop edges"),
          Crop {
             x: 0,
             y: 0,
@@ -396,18 +434,15 @@ mod tests {
             height: 2,
          }
       );
-      assert_eq!(
-         crop_from_edges(image, [None, None, None, None]).expect("full image"),
-         Crop {
-            x: 0,
-            y: 0,
-            width: 4,
-            height: 2,
-         }
-      );
-      assert!(crop_from_edges(image, [Some(0), None, Some(3), Some(1)]).is_err());
-      assert!(crop_from_edges(image, [Some(2), Some(0), Some(1), Some(1)]).is_err());
-      assert!(crop_from_edges(image, [Some(-1), Some(0), Some(3), Some(1)]).is_err());
+   }
+
+   #[rstest]
+   #[case::partial([Some(0), None, Some(3), Some(1)])]
+   #[case::reversed([Some(2), Some(0), Some(1), Some(1)])]
+   #[case::negative([Some(-1), Some(0), Some(3), Some(1)])]
+   fn rejects_partial_reversed_or_negative_crop_edges(#[case] edges: [Option<i32>; 4]) {
+      let image = parse_media_image2(&image_blob(0)).expect("valid image");
+      assert!(crop_from_edges(image, edges).is_err());
    }
 
    #[test]
@@ -436,38 +471,37 @@ mod tests {
       );
    }
 
-   #[test]
-   fn uses_smaller_output_dimensions_when_the_rectangle_is_unavailable() {
+   #[rstest]
+   #[case::shorter([Some(4), Some(1)], [0, 0, 3, 0])]
+   #[case::narrower([Some(2), Some(2)], [0, 0, 1, 1])]
+   #[case::narrower_and_shorter([Some(2), Some(1)], [0, 0, 1, 0])]
+   fn uses_smaller_output_dimensions_when_the_rectangle_is_unavailable(
+      #[case] dimensions: [Option<i32>; 2],
+      #[case] expected: [i32; 4],
+   ) {
       let image = parse_media_image2(&image_blob(0)).expect("valid image");
-      for (dimensions, expected) in [
-         ([Some(4), Some(1)], [0, 0, 3, 0]),
-         ([Some(2), Some(2)], [0, 0, 1, 1]),
-         ([Some(2), Some(1)], [0, 0, 1, 0]),
-      ] {
-         assert_eq!(
-            reported_crop_edges(image, None, dimensions),
-            expected.map(Some)
-         );
-      }
+      assert_eq!(
+         reported_crop_edges(image, None, dimensions),
+         expected.map(Some)
+      );
    }
 
-   #[test]
-   fn ignores_missing_invalid_or_non_reducing_output_dimensions() {
+   #[rstest]
+   #[case::missing_width([None, Some(1)])]
+   #[case::missing_height([Some(2), None])]
+   #[case::zero_width([Some(0), Some(1)])]
+   #[case::zero_height([Some(2), Some(0)])]
+   #[case::negative_width([Some(-1), Some(1)])]
+   #[case::negative_height([Some(2), Some(-1)])]
+   #[case::wider_than_the_image([Some(5), Some(1)])]
+   #[case::taller_than_the_image([Some(2), Some(3)])]
+   #[case::the_full_image([Some(4), Some(2)])]
+   #[case::i32_max([Some(i32::MAX), Some(i32::MAX)])]
+   fn ignores_missing_invalid_or_non_reducing_output_dimensions(
+      #[case] dimensions: [Option<i32>; 2],
+   ) {
       let image = parse_media_image2(&image_blob(0)).expect("valid image");
-      for dimensions in [
-         [None, Some(1)],
-         [Some(2), None],
-         [Some(0), Some(1)],
-         [Some(2), Some(0)],
-         [Some(-1), Some(1)],
-         [Some(2), Some(-1)],
-         [Some(5), Some(1)],
-         [Some(2), Some(3)],
-         [Some(4), Some(2)],
-         [Some(i32::MAX), Some(i32::MAX)],
-      ] {
-         assert_eq!(reported_crop_edges(image, None, dimensions), [None; 4]);
-      }
+      assert_eq!(reported_crop_edges(image, None, dimensions), [None; 4]);
    }
 
    #[test]
@@ -478,8 +512,17 @@ mod tests {
          timestamp_to_token(i64::try_from(timestamp).expect("test timestamp fits")),
          Ok(FrameToken::new(7))
       );
-      assert!(timestamp_to_token(-1).is_err());
-      assert!(timestamp_to_token(7_001).is_err());
+   }
+
+   #[rstest]
+   #[case::negative(-1)]
+   #[case::outside_the_token_scale(7_001)]
+   fn rejects_negative_or_off_scale_timestamps(#[case] timestamp: i64) {
+      assert!(timestamp_to_token(timestamp).is_err());
+   }
+
+   #[test]
+   fn rejects_tokens_that_overflow_the_timestamp_scale() {
       assert!(token_to_timestamp(FrameToken::new(u64::MAX)).is_err());
    }
 }

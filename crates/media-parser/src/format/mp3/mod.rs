@@ -143,6 +143,7 @@ pub use tags::{frame_id_to_key, frame_name};
 mod tests {
    use super::*;
    use async_trait::async_trait;
+   use rstest::rstest;
 
    struct BytesReader(Vec<u8>);
 
@@ -204,20 +205,11 @@ mod tests {
       data
    }
 
+   #[rstest]
+   #[case::end_of_data(Vec::new())]
+   #[case::no_frame_found(vec![0; frame::MAX_SYNC_SEARCH as usize])]
    #[tokio::test]
-   async fn read_tracks_returns_empty_for_end_of_data() {
-      assert!(
-         read_tracks(&BytesReader(Vec::new()))
-            .await
-            .unwrap()
-            .is_empty()
-      );
-   }
-
-   #[tokio::test]
-   async fn read_tracks_returns_empty_when_no_frame_is_found() {
-      let data = vec![0; frame::MAX_SYNC_SEARCH as usize];
-
+   async fn read_tracks_returns_empty_without_a_frame(#[case] data: Vec<u8>) {
       assert!(read_tracks(&BytesReader(data)).await.unwrap().is_empty());
    }
 

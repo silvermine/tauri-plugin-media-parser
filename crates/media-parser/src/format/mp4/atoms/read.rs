@@ -123,6 +123,7 @@ pub fn read_box(data: &[u8], offset: usize) -> Option<BoxRead<'_>> {
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
 
    fn make_box(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
       let size = 8 + payload.len();
@@ -165,14 +166,24 @@ mod tests {
       assert_eq!(b.payload, &[5, 6, 7, 8, 9, 10]);
    }
 
-   #[test]
-   fn test_read_box_rejects_unrepresentable_extended_size() {
+   fn unrepresentable_extended_size_data() -> Vec<u8> {
       let mut data = vec![0u8; 8];
       data.extend_from_slice(&1u32.to_be_bytes());
       data.extend_from_slice(b"mdat");
       data.extend_from_slice(&u64::MAX.to_be_bytes());
+      data
+   }
 
-      assert!(read_box(&data, 8).is_none());
+   #[rstest]
+   #[case::unrepresentable_extended_size(unrepresentable_extended_size_data(), 8)]
+   // Claims 16, only 8
+   #[case::insufficient_data(vec![0, 0, 0, 16, b'm', b'o', b'o', b'v'], 0)]
+   #[case::zero_size(vec![0, 0, 0, 0, b'm', b'o', b'o', b'v'], 0)]
+   // size 4 < header 8
+   #[case::size_too_small(vec![0, 0, 0, 4, b't', b'e', b's', b't'], 0)]
+   #[case::out_of_bounds(make_box(b"test", &[1, 2, 3, 4]), 100)]
+   fn test_read_box_rejects_invalid_box(#[case] data: Vec<u8>, #[case] offset: usize) {
+      assert!(read_box(&data, offset).is_none());
    }
 
    #[cfg(target_pointer_width = "32")]
@@ -195,34 +206,6 @@ mod tests {
       let b = read_box(&data, 16).unwrap();
       assert_eq!(b.fourcc, *b"moov");
       assert_eq!(b.payload, &[1, 2, 3, 4]);
-   }
-
-   #[test]
-   fn test_read_box_insufficient_data() {
-      let data = [0, 0, 0, 16, b'm', b'o', b'o', b'v']; // Claims 16, only 8
-
-      assert!(read_box(&data, 0).is_none());
-   }
-
-   #[test]
-   fn test_read_box_zero_size() {
-      let data = [0, 0, 0, 0, b'm', b'o', b'o', b'v'];
-
-      assert!(read_box(&data, 0).is_none());
-   }
-
-   #[test]
-   fn test_read_box_size_too_small() {
-      let data = [0, 0, 0, 4, b't', b'e', b's', b't']; // size 4 < header 8
-
-      assert!(read_box(&data, 0).is_none());
-   }
-
-   #[test]
-   fn test_read_box_out_of_bounds() {
-      let data = make_box(b"test", &[1, 2, 3, 4]);
-
-      assert!(read_box(&data, 100).is_none());
    }
 
    #[test]

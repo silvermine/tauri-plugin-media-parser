@@ -42,6 +42,7 @@ media-parser = { path = "crates/media-parser", default-features = false }
 tauri-plugin = { version = "2.7.1", features = ["build"] }
 
 [dev-dependencies]
+rstest = { version = "0.28.0", default-features = false }
 tauri = { version = "2.12.0", features = ["test"] }
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "test-util"] }
 wiremock = "0.6.5"

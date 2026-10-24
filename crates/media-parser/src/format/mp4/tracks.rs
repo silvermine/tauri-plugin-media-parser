@@ -227,6 +227,7 @@ fn language_string(language: [u8; 3]) -> String {
 mod tests {
    use super::*;
    use async_trait::async_trait;
+   use rstest::rstest;
 
    fn mp4_box(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
       let mut b = ((8 + payload.len()) as u32).to_be_bytes().to_vec();
@@ -315,30 +316,41 @@ mod tests {
       }
    }
 
-   #[test]
-   fn classify_handler_maps_known_and_unknown_types() {
-      assert_eq!(classify_handler(*b"vide"), TrackKind::Video);
-      assert_eq!(classify_handler(*b"soun"), TrackKind::Audio);
-      for h in [b"sbtl", b"subt", b"text", b"clcp"] {
-         assert_eq!(classify_handler(*h), TrackKind::Subtitle);
+   #[rstest]
+   #[case::vide_video(*b"vide", TrackKind::Video)]
+   #[case::soun_audio(*b"soun", TrackKind::Audio)]
+   #[case::sbtl_subtitle(*b"sbtl", TrackKind::Subtitle)]
+   #[case::subt_subtitle(*b"subt", TrackKind::Subtitle)]
+   #[case::text_subtitle(*b"text", TrackKind::Subtitle)]
+   #[case::clcp_subtitle(*b"clcp", TrackKind::Subtitle)]
+   #[case::meta_unknown(*b"meta", TrackKind::Unknown)]
+   fn classify_handler_maps_known_and_unknown_types(
+      #[case] handler: [u8; 4],
+      #[case] kind: TrackKind,
+   ) {
+      assert_eq!(classify_handler(handler), kind);
+   }
+
+   fn track_kind(track: &TrackType) -> TrackKind {
+      match track {
+         TrackType::Video(_) => TrackKind::Video,
+         TrackType::Audio(_) => TrackKind::Audio,
+         TrackType::Subtitle(_) => TrackKind::Subtitle,
+         TrackType::Unknown(_) => TrackKind::Unknown,
       }
-      assert_eq!(classify_handler(*b"meta"), TrackKind::Unknown);
+   }
+
+   #[rstest]
+   #[case::vide_video(b"vide", TrackKind::Video)]
+   #[case::soun_audio(b"soun", TrackKind::Audio)]
+   #[case::subt_subtitle(b"subt", TrackKind::Subtitle)]
+   fn parse_trak_dispatches_by_handler(#[case] handler: &[u8; 4], #[case] kind: TrackKind) {
+      let track = parse_trak(&trak_payload(1, handler)).unwrap();
+      assert_eq!(track_kind(&track), kind);
    }
 
    #[test]
-   fn parse_trak_dispatches_by_handler() {
-      assert!(matches!(
-         parse_trak(&trak_payload(1, b"vide")).unwrap(),
-         TrackType::Video(_)
-      ));
-      assert!(matches!(
-         parse_trak(&trak_payload(2, b"soun")).unwrap(),
-         TrackType::Audio(_)
-      ));
-      assert!(matches!(
-         parse_trak(&trak_payload(3, b"subt")).unwrap(),
-         TrackType::Subtitle(_)
-      ));
+   fn parse_trak_dispatches_unknown_handler_and_keeps_its_track_id() {
       let unknown = parse_trak(&trak_payload(4, b"meta")).unwrap();
       assert!(matches!(&unknown, TrackType::Unknown(_)));
       if let TrackType::Unknown(meta) = unknown {
@@ -346,19 +358,17 @@ mod tests {
       }
    }
 
-   #[test]
-   fn parse_trak_errors_on_missing_required_boxes() {
-      // Missing tkhd.
-      let mdia = mp4_box(b"mdia", &mp4_box(b"mdhd", &mdhd()));
-      assert!(parse_trak(&mdia).is_err());
-      // Missing mdia.
-      assert!(parse_trak(&mp4_box(b"tkhd", &tkhd(1))).is_err());
-      // mdia present but missing mdhd.
-      let trak = [
+   #[rstest]
+   #[case::missing_tkhd(mp4_box(b"mdia", &mp4_box(b"mdhd", &mdhd())))]
+   #[case::missing_mdia(mp4_box(b"tkhd", &tkhd(1)))]
+   #[case::mdia_missing_mdhd(
+      [
          mp4_box(b"tkhd", &tkhd(1)),
          mp4_box(b"mdia", &mp4_box(b"hdlr", &hdlr(b"vide"))),
       ]
-      .concat();
+      .concat()
+   )]
+   fn parse_trak_errors_on_missing_required_boxes(#[case] trak: Vec<u8>) {
       assert!(parse_trak(&trak).is_err());
    }
 
@@ -378,58 +388,46 @@ mod tests {
       }
    }
 
+   #[rstest]
+   // Malformed: has tkhd but no mdia, so parse_trak fails.
+   #[case::skips_malformed_trak_and_keeps_valid_ones(mp4_box(
+      b"moov",
+      &[
+         mp4_box(b"trak", &trak_payload(1, b"vide")),
+         mp4_box(b"trak", &mp4_box(b"tkhd", &tkhd(2))),
+      ]
+      .concat(),
+   ))]
+   #[case::supports_extended_size_moov_header(extended_mp4_box(
+      b"moov",
+      &mp4_box(b"trak", &trak_payload(1, b"vide")),
+   ))]
    #[tokio::test]
-   async fn read_tracks_skips_malformed_trak_and_keeps_valid_ones() {
-      let good = mp4_box(b"trak", &trak_payload(1, b"vide"));
-      // Malformed: has tkhd but no mdia, so parse_trak fails.
-      let bad = mp4_box(b"trak", &mp4_box(b"tkhd", &tkhd(2)));
-      let moov = mp4_box(b"moov", &[good, bad].concat());
-
+   async fn read_tracks_returns_the_single_valid_video_track(#[case] moov: Vec<u8>) {
       let tracks = read_tracks(&BytesReader(moov)).await.unwrap();
 
       assert_eq!(tracks.len(), 1);
       assert!(matches!(tracks[0], TrackType::Video(_)));
    }
 
+   #[rstest]
+   #[case::every_trak_malformed(0, "all trak boxes are malformed (count: 1)")]
+   #[case::more_than_1000_trak_boxes_before_parsing(1000, "track count exceeds limit of 1000")]
    #[tokio::test]
-   async fn read_tracks_supports_extended_size_moov_header() {
-      let trak = mp4_box(b"trak", &trak_payload(1, b"vide"));
-      let moov = extended_mp4_box(b"moov", &trak);
-
-      let tracks = read_tracks(&BytesReader(moov)).await.unwrap();
-
-      assert_eq!(tracks.len(), 1);
-      assert!(matches!(tracks[0], TrackType::Video(_)));
-   }
-
-   #[tokio::test]
-   async fn read_tracks_errors_when_every_trak_is_malformed() {
-      let bad = mp4_box(b"trak", &mp4_box(b"tkhd", &tkhd(2)));
-      let moov = mp4_box(b"moov", &bad);
-
-      let error = read_tracks(&BytesReader(moov)).await.unwrap_err();
-
-      assert!(
-         error
-            .to_string()
-            .contains("all trak boxes are malformed (count: 1)")
-      );
-   }
-
-   #[tokio::test]
-   async fn read_tracks_rejects_more_than_1000_trak_boxes_before_parsing() {
+   async fn read_tracks_errors_on_malformed_or_excess_trak_boxes(
+      #[case] valid_traks: usize,
+      #[case] message: &str,
+   ) {
       let valid = mp4_box(b"trak", &trak_payload(1, b"vide"));
       let malformed = mp4_box(b"trak", &mp4_box(b"tkhd", &tkhd(2)));
-      let mut moov_payload = valid.repeat(1000);
+      let mut moov_payload = valid.repeat(valid_traks);
       moov_payload.extend(malformed);
       let moov = mp4_box(b"moov", &moov_payload);
 
       let error = read_tracks(&BytesReader(moov)).await.unwrap_err();
 
       assert!(
-         error
-            .to_string()
-            .contains("track count exceeds limit of 1000"),
+         error.to_string().contains(message),
          "unexpected error: {error}"
       );
    }

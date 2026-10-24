@@ -184,6 +184,7 @@ impl IStream_Impl for Stream_Impl {
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
 
    #[test]
    fn stream_edits_reads_and_zero_fills() {
@@ -276,67 +277,85 @@ mod tests {
    }
 
    #[test]
-   fn stream_keeps_first_failure() {
-      for allocation in [false, true] {
-         let state = Rc::new(RefCell::new(StreamState {
-            output: FallibleJpegWriter::new(8),
-            pos: 0,
-            calls: 0,
-         }));
-         let stream: IStream = Stream(state.clone()).into();
-         unsafe {
-            stream
-               .Write([1u8, 2].as_ptr().cast(), 2, None)
-               .ok()
-               .unwrap();
-            state.borrow_mut().output.fail_reserve = allocation;
-            assert!(
-               stream
-                  .Write(
-                     [3u8; 7].as_ptr().cast(),
-                     if allocation { 4 } else { 7 },
-                     None
-                  )
-                  .is_err()
-            );
-            stream.Seek(0, STREAM_SEEK_SET, None).unwrap();
-            assert!(stream.Write([9u8].as_ptr().cast(), 1, None).is_err());
-            assert!(stream.SetSize(0).is_err());
-            assert_eq!(state.borrow().output.bytes(), [1, 2]);
-         }
-         drop(stream);
-         let result = Rc::try_unwrap(state)
+   fn stream_keeps_first_output_limit_failure() {
+      let state = Rc::new(RefCell::new(StreamState {
+         output: FallibleJpegWriter::new(8),
+         pos: 0,
+         calls: 0,
+      }));
+      let stream: IStream = Stream(state.clone()).into();
+      unsafe {
+         stream
+            .Write([1u8, 2].as_ptr().cast(), 2, None)
             .ok()
-            .unwrap()
-            .into_inner()
-            .output
-            .finish(Ok(()));
-         assert!(if allocation {
-            matches!(result, Err(super::super::JpegError::ResourceLimit(_)))
-         } else {
-            matches!(result, Err(super::super::JpegError::OutputLimit(_)))
-         });
+            .unwrap();
+         assert!(stream.Write([3u8; 7].as_ptr().cast(), 7, None).is_err());
+         stream.Seek(0, STREAM_SEEK_SET, None).unwrap();
+         assert!(stream.Write([9u8].as_ptr().cast(), 1, None).is_err());
+         assert!(stream.SetSize(0).is_err());
+         assert_eq!(state.borrow().output.bytes(), [1, 2]);
       }
+      drop(stream);
+      let result = Rc::try_unwrap(state)
+         .ok()
+         .unwrap()
+         .into_inner()
+         .output
+         .finish(Ok(()));
+      assert!(matches!(
+         result,
+         Err(super::super::JpegError::OutputLimit(_))
+      ));
    }
+
    #[test]
-   fn stream_is_not_agile() {
+   fn stream_keeps_first_allocation_failure() {
+      let state = Rc::new(RefCell::new(StreamState {
+         output: FallibleJpegWriter::new(8),
+         pos: 0,
+         calls: 0,
+      }));
+      let stream: IStream = Stream(state.clone()).into();
+      unsafe {
+         stream
+            .Write([1u8, 2].as_ptr().cast(), 2, None)
+            .ok()
+            .unwrap();
+         state.borrow_mut().output.fail_reserve = true;
+         assert!(stream.Write([3u8; 7].as_ptr().cast(), 4, None).is_err());
+         stream.Seek(0, STREAM_SEEK_SET, None).unwrap();
+         assert!(stream.Write([9u8].as_ptr().cast(), 1, None).is_err());
+         assert!(stream.SetSize(0).is_err());
+         assert_eq!(state.borrow().output.bytes(), [1, 2]);
+      }
+      drop(stream);
+      let result = Rc::try_unwrap(state)
+         .ok()
+         .unwrap()
+         .into_inner()
+         .output
+         .finish(Ok(()));
+      assert!(matches!(
+         result,
+         Err(super::super::JpegError::ResourceLimit(_))
+      ));
+   }
+   #[rstest]
+   #[case::agile_object(IAgileObject::IID)]
+   // IMarshal's IID avoids enabling its otherwise unused generated API feature.
+   #[case::marshal(GUID::from_u128(0x00000003_0000_0000_c000_000000000046))]
+   fn stream_is_not_agile(#[case] iid: GUID) {
       let state = Rc::new(RefCell::new(StreamState {
          output: FallibleJpegWriter::new(16),
          pos: 0,
          calls: 0,
       }));
       let stream: IStream = Stream(state).into();
-      // IMarshal's IID avoids enabling its otherwise unused generated API feature.
-      for iid in [
-         IAgileObject::IID,
-         GUID::from_u128(0x00000003_0000_0000_c000_000000000046),
-      ] {
-         let mut interface = std::ptr::null_mut();
-         let result = unsafe { stream.query(&iid, &mut interface) };
-         if !interface.is_null() {
-            drop(unsafe { IUnknown::from_raw(interface) });
-         }
-         assert_eq!(result, E_NOINTERFACE);
+      let mut interface = std::ptr::null_mut();
+      let result = unsafe { stream.query(&iid, &mut interface) };
+      if !interface.is_null() {
+         drop(unsafe { IUnknown::from_raw(interface) });
       }
+      assert_eq!(result, E_NOINTERFACE);
    }
 }

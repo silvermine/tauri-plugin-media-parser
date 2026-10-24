@@ -463,6 +463,7 @@ fn writer_limit_error() -> io::Error {
 mod tests {
    use super::*;
    use media_parser::{BaseTrackMeta, PixelFormat, SubtitleCue, SubtitleTrack};
+   use rstest::rstest;
    use serde::ser::SerializeSeq;
    use std::collections::HashMap;
    use std::sync::atomic::{AtomicUsize, Ordering};
@@ -667,18 +668,13 @@ mod tests {
       assert_eq!(error.to_string(), "thumbnail must be JPEG, got png");
    }
 
-   #[test]
-   fn thumbnail_envelope_rejects_payloads_beyond_the_output_cap() {
-      let result = encode_thumbnail_envelope(&test_frames(), &[0, 1], ENVELOPE_PREFIX_BYTES);
-
-      assert!(result.is_err());
-   }
-
-   #[test]
-   fn thumbnail_envelope_counts_header_bytes_toward_the_output_cap() {
-      let payload_len = test_frames().iter().map(|frame| frame.data.len()).sum();
-
-      let result = encode_thumbnail_envelope(&test_frames(), &[0, 1], payload_len);
+   #[rstest]
+   #[case::payloads_beyond_the_cap(ENVELOPE_PREFIX_BYTES)]
+   #[case::header_bytes_count_toward_the_cap(
+      test_frames().iter().map(|frame| frame.data.len()).sum(),
+   )]
+   fn thumbnail_envelope_rejects_bytes_beyond_the_output_cap(#[case] max_output_bytes: usize) {
+      let result = encode_thumbnail_envelope(&test_frames(), &[0, 1], max_output_bytes);
 
       assert!(result.is_err());
    }
@@ -737,6 +733,10 @@ mod tests {
       let (header, payload) = envelope_parts(&envelope);
       assert_eq!(header, serde_json::json!({ "version": 1, "entries": [] }));
       assert!(payload.is_empty());
+   }
+
+   #[test]
+   fn empty_subtitle_envelope_rejects_a_cap_below_the_shared_projected_base() {
       assert!(encode_subtitle_envelope(&[], SUBTITLE_ENVELOPE_PROJECTED_BASE_BYTES - 1).is_err());
    }
 
@@ -800,29 +800,36 @@ mod tests {
       assert!(error.to_string().contains("subtitle envelope is too large"));
    }
 
-   #[test]
-   fn subtitle_rejects_zero_or_reversed_cue_timings() {
-      for (start_ms, end_ms) in [(1_000, 1_000), (2_000, 1_000)] {
-         let tracks = [subtitle_track(
-            None,
-            vec![subtitle_cue(1, start_ms, end_ms, "invalid")],
-         )];
+   #[rstest]
+   #[case::zero_length_cue(1_000, 1_000)]
+   #[case::reversed_cue(2_000, 1_000)]
+   fn subtitle_rejects_zero_or_reversed_cue_timings(#[case] start_ms: u64, #[case] end_ms: u64) {
+      let tracks = [subtitle_track(
+         None,
+         vec![subtitle_cue(1, start_ms, end_ms, "invalid")],
+      )];
 
-         let error = encode_subtitle_envelope(&tracks, MAX_SUBTITLE_OUTPUT_BYTES)
-            .expect_err("subtitle cue end must be after its start");
-         assert!(error.to_string().contains("invalid subtitle cue timing"));
-      }
+      let error = encode_subtitle_envelope(&tracks, MAX_SUBTITLE_OUTPUT_BYTES)
+         .expect_err("subtitle cue end must be after its start");
+      assert!(error.to_string().contains("invalid subtitle cue timing"));
    }
 
    #[test]
-   fn subtitle_accepts_js_safe_duration_and_rejects_the_next_integer() {
-      let mut tracks = [subtitle_track(
+   fn subtitle_accepts_js_safe_duration() {
+      let tracks = [subtitle_track(
          None,
          vec![subtitle_cue(1, 0, 1_000, "safe")],
       )];
       encode_subtitle_envelope(&tracks, MAX_SUBTITLE_OUTPUT_BYTES)
          .expect("Number.MAX_SAFE_INTEGER should be accepted");
+   }
 
+   #[test]
+   fn subtitle_rejects_the_integer_after_the_js_safe_duration() {
+      let mut tracks = [subtitle_track(
+         None,
+         vec![subtitle_cue(1, 0, 1_000, "safe")],
+      )];
       tracks[0].base.duration = JS_MAX_SAFE_INTEGER + 1;
       let error = encode_subtitle_envelope(&tracks, MAX_SUBTITLE_OUTPUT_BYTES)
          .expect_err("an integer above Number.MAX_SAFE_INTEGER must fail");
@@ -830,15 +837,28 @@ mod tests {
    }
 
    #[test]
-   fn subtitle_checked_envelope_arithmetic_rejects_overflow() {
+   fn subtitle_checked_header_cap_clamps_to_u32() {
       assert_eq!(
          checked_header_cap(usize::MAX, 0).expect("header cap should be representable"),
          u32::MAX as usize
       );
+   }
+
+   #[test]
+   fn subtitle_checked_header_cap_rejects_overflow() {
       assert!(checked_header_cap(ENVELOPE_PREFIX_BYTES, 1).is_err());
-      assert!(checked_envelope_len(usize::MAX, 1, usize::MAX).is_err());
-      assert!(checked_envelope_len(1, usize::MAX, usize::MAX).is_err());
-      assert!(checked_envelope_len(0, 0, ENVELOPE_PREFIX_BYTES - 1).is_err());
+   }
+
+   #[rstest]
+   #[case::header_overflow(usize::MAX, 1, usize::MAX)]
+   #[case::payload_overflow(1, usize::MAX, usize::MAX)]
+   #[case::prefix_beyond_the_cap(0, 0, ENVELOPE_PREFIX_BYTES - 1)]
+   fn subtitle_checked_envelope_len_rejects_overflow_and_prefixes_beyond_the_cap(
+      #[case] header_len: usize,
+      #[case] payload_len: usize,
+      #[case] max_output_bytes: usize,
+   ) {
+      assert!(checked_envelope_len(header_len, payload_len, max_output_bytes).is_err());
    }
 
    struct StreamingEntries<'a> {

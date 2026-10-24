@@ -184,100 +184,101 @@ pub(crate) fn session_expiration(source: &MediaSourceKey) -> ExpirationPolicy {
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
    use std::collections::HashMap;
    use std::time::Duration;
 
-   #[test]
-   fn per_call_host_is_rejected_ignoring_case_when_defaults_apply() {
-      for origins in [None, Some(vec!["https://api.example".into()])] {
-         let defaults = DefaultHeaders::new(
-            HashMap::from([("authorization".into(), "Bearer test".into())]),
-            origins,
-         )
+   #[rstest]
+   fn per_call_host_is_rejected_ignoring_case_when_defaults_apply(
+      #[values(false, true)] restricted: bool,
+      #[values("Host", "host", "HOST", "hOsT")] name: &str,
+      #[values(false, true)] override_default: bool,
+   ) {
+      let origins = restricted.then(|| vec!["https://api.example".into()]);
+      let defaults = DefaultHeaders::new(
+         HashMap::from([("authorization".into(), "Bearer test".into())]),
+         origins,
+      )
+      .unwrap();
+      let mut headers = HashMap::from([(name.into(), "other-tenant.example".into())]);
+      if override_default {
+         headers.insert("Authorization".into(), "Bearer per-call".into());
+      }
+      let result = defaults.merge("https://api.example/file", Some(headers));
+      assert!(
+         matches!(result, Err(crate::Error::Custom(ref message)) if message.contains("Host")),
+         "per-call {name} must fail when defaults apply: {result:?}"
+      );
+   }
+
+   fn authorization() -> HashMap<String, String> {
+      HashMap::from([("authorization".into(), "Bearer test".into())])
+   }
+
+   #[rstest]
+   #[case::no_defaults_global(HashMap::new(), None)]
+   #[case::no_defaults_allowed_origin(HashMap::new(), Some(vec!["https://api.example".into()]))]
+   #[case::empty_origins(authorization(), Some(vec![]))]
+   #[case::other_origin(authorization(), Some(vec!["https://other.example".into()]))]
+   fn per_call_host_is_preserved_when_no_defaults_apply(
+      #[case] headers: HashMap<String, String>,
+      #[case] origins: Option<Vec<String>>,
+   ) {
+      let defaults = DefaultHeaders::new(headers, origins).unwrap();
+      let per_call = Some(HashMap::from([(
+         "Host".into(),
+         "other-tenant.example".into(),
+      )]));
+      let merged = defaults
+         .merge("https://api.example/file", per_call.clone())
          .unwrap();
-         for name in ["Host", "host", "HOST", "hOsT"] {
-            for override_default in [false, true] {
-               let mut headers = HashMap::from([(name.into(), "other-tenant.example".into())]);
-               if override_default {
-                  headers.insert("Authorization".into(), "Bearer per-call".into());
-               }
-               let result = defaults.merge("https://api.example/file", Some(headers));
-               assert!(
-                  matches!(result, Err(crate::Error::Custom(ref message)) if message.contains("Host")),
-                  "per-call {name} must fail when defaults apply: {result:?}"
-               );
-            }
-         }
-      }
+      assert_eq!(merged.headers, per_call);
+      assert!(!merged.force_same_origin);
    }
 
-   #[test]
-   fn per_call_host_is_preserved_when_no_defaults_apply() {
-      let configured = HashMap::from([("authorization".into(), "Bearer test".into())]);
-      for (headers, origins) in [
-         (HashMap::new(), None),
-         (HashMap::new(), Some(vec!["https://api.example".into()])),
-         (configured.clone(), Some(vec![])),
-         (configured, Some(vec!["https://other.example".into()])),
-      ] {
-         let defaults = DefaultHeaders::new(headers, origins).unwrap();
-         let per_call = Some(HashMap::from([(
-            "Host".into(),
-            "other-tenant.example".into(),
-         )]));
-         let merged = defaults
-            .merge("https://api.example/file", per_call.clone())
-            .unwrap();
-         assert_eq!(merged.headers, per_call);
-         assert!(!merged.force_same_origin);
-      }
-   }
-
-   #[test]
-   fn rust_default_host_is_allowed() {
+   #[rstest]
+   fn rust_default_host_is_allowed(#[values(false, true)] restricted: bool) {
       let headers = HashMap::from([
          ("Host".into(), "trusted-tenant.example".into()),
          ("authorization".into(), "Bearer test".into()),
       ]);
-      for origins in [None, Some(vec!["https://api.example".into()])] {
-         let restricted = origins.is_some();
-         let defaults = DefaultHeaders::new(headers.clone(), origins).unwrap();
-         let merged = defaults.merge("https://api.example/file", None).unwrap();
-         assert_eq!(merged.headers, Some(headers.clone()));
-         assert_eq!(merged.force_same_origin, restricted);
-      }
+      let origins = restricted.then(|| vec!["https://api.example".into()]);
+      let defaults = DefaultHeaders::new(headers.clone(), origins).unwrap();
+      let merged = defaults.merge("https://api.example/file", None).unwrap();
+      assert_eq!(merged.headers, Some(headers));
+      assert_eq!(merged.force_same_origin, restricted);
+   }
+
+   #[rstest]
+   #[case::lowercase_default("x-app-version", "X-App-Version")]
+   #[case::lowercase_request("X-App-Version", "x-app-version")]
+   fn per_call_headers_override_defaults_ignoring_case(
+      #[case] default_name: &str,
+      #[case] request_name: &str,
+   ) {
+      let defaults = DefaultHeaders::new(
+         HashMap::from([
+            (default_name.into(), "1.0".into()),
+            ("x-other".into(), "keep".into()),
+         ]),
+         None,
+      )
+      .unwrap();
+      let headers = Some(HashMap::from([(request_name.into(), "2.0".into())]));
+      assert_eq!(
+         defaults
+            .merge("https://example.com/video.mp4", headers)
+            .unwrap()
+            .headers,
+         Some(HashMap::from([
+            (request_name.into(), "2.0".into()),
+            ("x-other".into(), "keep".into()),
+         ])),
+      );
    }
 
    #[test]
-   fn per_call_headers_override_defaults_ignoring_case() {
-      for (default_name, request_name) in [
-         ("x-app-version", "X-App-Version"),
-         ("X-App-Version", "x-app-version"),
-      ] {
-         let defaults = DefaultHeaders::new(
-            HashMap::from([
-               (default_name.into(), "1.0".into()),
-               ("x-other".into(), "keep".into()),
-            ]),
-            None,
-         )
-         .unwrap();
-         let headers = Some(HashMap::from([(request_name.into(), "2.0".into())]));
-         assert_eq!(
-            defaults
-               .merge("https://example.com/video.mp4", headers)
-               .unwrap()
-               .headers,
-            Some(HashMap::from([
-               (request_name.into(), "2.0".into()),
-               ("x-other".into(), "keep".into()),
-            ])),
-         );
-      }
-   }
-
-   #[test]
-   fn default_headers_only_reach_normalized_allowed_origins() {
+   fn default_headers_reach_the_normalized_allowed_origin() {
       let headers = HashMap::from([("authorization".into(), "Bearer test".into())]);
       let defaults = DefaultHeaders::new(
          headers.clone(),
@@ -289,60 +290,74 @@ mod tests {
          .unwrap();
       assert_eq!(merged.headers, Some(headers));
       assert!(merged.force_same_origin);
-      for source in [
-         "http://api.example/video.mp4",
-         "https://api.example:444/video.mp4",
-         "https://sub.api.example/video.mp4",
-         "https://api.example.evil/video.mp4",
-      ] {
-         let per_call = Some(HashMap::from([("x-call".into(), "keep".into())]));
-         let merged = defaults.merge(source, per_call.clone()).unwrap();
-         assert_eq!(merged.headers, per_call);
-         assert!(!merged.force_same_origin);
-      }
+   }
+
+   #[rstest]
+   #[case::http_scheme("http://api.example/video.mp4")]
+   #[case::other_port("https://api.example:444/video.mp4")]
+   #[case::subdomain("https://sub.api.example/video.mp4")]
+   #[case::suffixed_host("https://api.example.evil/video.mp4")]
+   fn default_headers_only_reach_normalized_allowed_origins(#[case] source: &str) {
+      let headers = HashMap::from([("authorization".into(), "Bearer test".into())]);
+      let defaults =
+         DefaultHeaders::new(headers, Some(vec!["https://API.EXAMPLE:443/path".into()])).unwrap();
+      let per_call = Some(HashMap::from([("x-call".into(), "keep".into())]));
+      let merged = defaults.merge(source, per_call.clone()).unwrap();
+      assert_eq!(merged.headers, per_call);
+      assert!(!merged.force_same_origin);
+   }
+
+   fn user_agent() -> HashMap<String, String> {
+      HashMap::from([("user-agent".into(), "app/1.0".into())])
+   }
+
+   fn user_agent_and_host() -> HashMap<String, String> {
+      let mut headers = user_agent();
+      headers.insert("Host".into(), "other-tenant.example".into());
+      headers
    }
 
    #[test]
-   fn absent_origins_are_global_and_empty_origins_allow_none() {
-      let headers = HashMap::from([("user-agent".into(), "app/1.0".into())]);
-      let global = DefaultHeaders::new(headers.clone(), None).unwrap();
-      let empty = DefaultHeaders::new(headers.clone(), Some(vec![])).unwrap();
+   fn absent_origins_are_global() {
+      let global = DefaultHeaders::new(user_agent(), None).unwrap();
       let merged = global.merge("https://any.example/video.mp4", None).unwrap();
-      assert_eq!(merged.headers, Some(headers.clone()));
+      assert_eq!(merged.headers, Some(user_agent()));
       assert!(!merged.force_same_origin);
+   }
+
+   #[rstest]
+   #[case::empty_https(Some(vec![]), "https://any.example/video.mp4", None)]
+   #[case::global_unix_path(None, "/tmp/video.mp4", Some(user_agent_and_host()))]
+   #[case::empty_unix_path(Some(vec![]), "/tmp/video.mp4", Some(user_agent_and_host()))]
+   #[case::global_windows_path(None, "C:\\video.mp4", Some(user_agent_and_host()))]
+   #[case::empty_windows_path(Some(vec![]), "C:\\video.mp4", Some(user_agent_and_host()))]
+   #[case::global_file_url(None, "file:///tmp/video.mp4", Some(user_agent_and_host()))]
+   #[case::empty_file_url(
+      Some(vec![]),
+      "file:///tmp/video.mp4",
+      Some(user_agent_and_host()),
+   )]
+   #[case::global_scheme_only(None, "https://", Some(user_agent_and_host()))]
+   #[case::empty_scheme_only(Some(vec![]), "https://", Some(user_agent_and_host()))]
+   fn empty_origins_and_non_http_sources_merge_no_headers(
+      #[case] origins: Option<Vec<String>>,
+      #[case] source: &str,
+      #[case] per_call: Option<HashMap<String, String>>,
+   ) {
+      let defaults = DefaultHeaders::new(user_agent(), origins).unwrap();
       assert_eq!(
-         empty.merge("https://any.example/video.mp4", None).unwrap(),
+         defaults.merge(source, per_call).unwrap(),
          MergedHeaders::default()
       );
-      for source in [
-         "/tmp/video.mp4",
-         "C:\\video.mp4",
-         "file:///tmp/video.mp4",
-         "https://",
-      ] {
-         let mut headers = headers.clone();
-         headers.insert("Host".into(), "other-tenant.example".into());
-         assert_eq!(
-            global.merge(source, Some(headers.clone())).unwrap(),
-            MergedHeaders::default()
-         );
-         assert_eq!(
-            empty.merge(source, Some(headers.clone())).unwrap(),
-            MergedHeaders::default()
-         );
-      }
    }
 
-   #[test]
-   fn invalid_default_header_origins_are_rejected() {
-      for origin in [
-         "not a URL",
-         "file:///tmp/video.mp4",
-         "ftp://api.example",
-         "https://",
-      ] {
-         assert!(DefaultHeaders::new(HashMap::new(), Some(vec![origin.into()])).is_err());
-      }
+   #[rstest]
+   #[case::not_a_url("not a URL")]
+   #[case::file_url("file:///tmp/video.mp4")]
+   #[case::ftp_url("ftp://api.example")]
+   #[case::scheme_only("https://")]
+   fn invalid_default_header_origins_are_rejected(#[case] origin: &str) {
+      assert!(DefaultHeaders::new(HashMap::new(), Some(vec![origin.into()])).is_err());
    }
 
    #[tokio::test]
@@ -420,48 +435,41 @@ mod tests {
       );
    }
 
-   #[test]
-   fn only_effectively_inserted_restricted_defaults_force_same_origin() {
-      let source = "https://example.com/video.mp4";
-      let defaults = DefaultHeaders::new(
-         HashMap::from([
-            ("User-Agent".into(), "app/1.0".into()),
-            ("X-App-Version".into(), "1.0".into()),
-         ]),
-         Some(vec![source.into()]),
-      )
-      .unwrap();
-      let partial_override = defaults
-         .merge(
-            source,
-            Some(HashMap::from([("user-agent".into(), "app/1.0".into())])),
-         )
-         .unwrap();
-      assert!(partial_override.force_same_origin);
-      let full_override = defaults
-         .merge(
-            source,
-            Some(HashMap::from([
-               ("user-agent".into(), "app/1.0".into()),
-               ("x-app-version".into(), "1.0".into()),
-            ])),
-         )
-         .unwrap();
-      assert!(!full_override.force_same_origin);
-      assert!(
-         !defaults
-            .merge("https://other.example/file", None)
-            .unwrap()
-            .force_same_origin
-      );
+   const RESTRICTED_SOURCE: &str = "https://example.com/video.mp4";
 
-      let empty_defaults = DefaultHeaders::new(HashMap::new(), Some(vec![source.into()])).unwrap();
-      assert!(
-         !empty_defaults
-            .merge(source, None)
-            .unwrap()
-            .force_same_origin
-      );
+   fn app_version_defaults() -> HashMap<String, String> {
+      HashMap::from([
+         ("User-Agent".into(), "app/1.0".into()),
+         ("X-App-Version".into(), "1.0".into()),
+      ])
+   }
+
+   fn app_version_override() -> HashMap<String, String> {
+      HashMap::from([
+         ("user-agent".into(), "app/1.0".into()),
+         ("x-app-version".into(), "1.0".into()),
+      ])
+   }
+
+   #[rstest]
+   #[case::partial_override(app_version_defaults(), RESTRICTED_SOURCE, Some(user_agent()), true)]
+   #[case::full_override(
+      app_version_defaults(),
+      RESTRICTED_SOURCE,
+      Some(app_version_override()),
+      false
+   )]
+   #[case::other_origin(app_version_defaults(), "https://other.example/file", None, false)]
+   #[case::empty_defaults(HashMap::new(), RESTRICTED_SOURCE, None, false)]
+   fn only_effectively_inserted_restricted_defaults_force_same_origin(
+      #[case] headers: HashMap<String, String>,
+      #[case] source: &str,
+      #[case] per_call: Option<HashMap<String, String>>,
+      #[case] forced: bool,
+   ) {
+      let defaults = DefaultHeaders::new(headers, Some(vec![RESTRICTED_SOURCE.into()])).unwrap();
+      let merged = defaults.merge(source, per_call).unwrap();
+      assert_eq!(merged.force_same_origin, forced);
    }
 
    #[tokio::test]
@@ -536,19 +544,23 @@ mod tests {
       assert!(first.local_version.is_none());
    }
 
+   #[rstest]
+   #[case::local_path_slides_for_one_minute(
+      "/file/that/does/not/exist.mp4",
+      ExpirationPolicy::Sliding(Duration::from_secs(60))
+   )]
+   #[case::remote_url_ends_after_five_minutes(
+      "https://example.com/video.mp4",
+      ExpirationPolicy::Absolute(Duration::from_secs(5 * 60))
+   )]
    #[tokio::test]
-   async fn local_sessions_slide_for_one_minute_and_remote_sessions_end_after_five() {
-      let local = source_key("/file/that/does/not/exist.mp4", &MergedHeaders::default()).await;
-      let remote = source_key("https://example.com/video.mp4", &MergedHeaders::default()).await;
+   async fn session_expiration_follows_the_source_kind(
+      #[case] source: &str,
+      #[case] expected: ExpirationPolicy,
+   ) {
+      let key = source_key(source, &MergedHeaders::default()).await;
 
-      assert_eq!(
-         session_expiration(&local),
-         ExpirationPolicy::Sliding(Duration::from_secs(60))
-      );
-      assert_eq!(
-         session_expiration(&remote),
-         ExpirationPolicy::Absolute(Duration::from_secs(5 * 60))
-      );
+      assert_eq!(session_expiration(&key), expected);
    }
 
    #[test]
@@ -556,11 +568,12 @@ mod tests {
       assert_eq!(SESSION_REAPER_INTERVAL, Duration::from_secs(1));
    }
 
-   #[test]
-   fn source_mode_recognizes_only_http_and_https_urls() {
-      assert!(is_http_source("http://example.com/video.mp4"));
-      assert!(is_http_source("https://example.com/video.mp4"));
-      assert!(!is_http_source("file:///tmp/video.mp4"));
-      assert!(!is_http_source("/tmp/video.mp4"));
+   #[rstest]
+   #[case::http_url("http://example.com/video.mp4", true)]
+   #[case::https_url("https://example.com/video.mp4", true)]
+   #[case::file_url("file:///tmp/video.mp4", false)]
+   #[case::local_path("/tmp/video.mp4", false)]
+   fn source_mode_recognizes_only_http_and_https_urls(#[case] source: &str, #[case] http: bool) {
+      assert_eq!(is_http_source(source), http);
    }
 }

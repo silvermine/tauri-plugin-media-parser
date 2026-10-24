@@ -128,6 +128,7 @@ pub fn fourcc_to_key(fourcc: [u8; 4]) -> String {
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
 
    #[test]
    fn test_tag_defs_sorted() {
@@ -143,27 +144,25 @@ mod tests {
       }
    }
 
-   #[test]
-   fn test_tag_name_known() {
-      assert_eq!(tag_name([0xA9, b'n', b'a', b'm']), "Title");
-      assert_eq!(tag_name([0xA9, b'A', b'R', b'T']), "Artist");
-      assert_eq!(tag_name([0xA9, b'a', b'l', b'b']), "Album");
-      assert_eq!(tag_name(*b"trkn"), "Track Number");
-      assert_eq!(tag_name(*b"disk"), "Disc Number");
-      assert_eq!(tag_name(*b"covr"), "Cover Art");
+   #[rstest]
+   #[case::title([0xA9, b'n', b'a', b'm'], "Title")]
+   #[case::artist([0xA9, b'A', b'R', b'T'], "Artist")]
+   #[case::album([0xA9, b'a', b'l', b'b'], "Album")]
+   #[case::track_number(*b"trkn", "Track Number")]
+   #[case::disc_number(*b"disk", "Disc Number")]
+   #[case::cover_art(*b"covr", "Cover Art")]
+   #[case::unknown_ascii_fourcc(*b"xxxx", "Unknown")]
+   #[case::unknown_all_zero_bytes(*b"\x00\x00\x00\x00", "Unknown")]
+   fn test_tag_name(#[case] fourcc: [u8; 4], #[case] expected: &str) {
+      assert_eq!(tag_name(fourcc), expected);
    }
 
-   #[test]
-   fn test_tag_name_unknown() {
-      assert_eq!(tag_name(*b"xxxx"), "Unknown");
-      assert_eq!(tag_name(*b"\x00\x00\x00\x00"), "Unknown");
-   }
-
-   #[test]
-   fn test_fourcc_to_key() {
-      assert_eq!(fourcc_to_key([0xA9, b'n', b'a', b'm']), "@nam");
-      assert_eq!(fourcc_to_key([0xA9, b'A', b'R', b'T']), "@ART");
-      assert_eq!(fourcc_to_key(*b"trkn"), "trkn");
-      assert_eq!(fourcc_to_key(*b"covr"), "covr");
+   #[rstest]
+   #[case::quicktime_nam([0xA9, b'n', b'a', b'm'], "@nam")]
+   #[case::quicktime_art([0xA9, b'A', b'R', b'T'], "@ART")]
+   #[case::itunes_trkn(*b"trkn", "trkn")]
+   #[case::itunes_covr(*b"covr", "covr")]
+   fn test_fourcc_to_key(#[case] fourcc: [u8; 4], #[case] expected: &str) {
+      assert_eq!(fourcc_to_key(fourcc), expected);
    }
 }

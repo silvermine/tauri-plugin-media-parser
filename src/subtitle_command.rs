@@ -167,6 +167,7 @@ pub(crate) async fn get_subtitles(
 mod tests {
    use super::*;
    use crate::session_cache::ExpirationPolicy;
+   use rstest::rstest;
    use std::sync::Arc;
    use std::sync::atomic::{AtomicUsize, Ordering};
    use std::time::Duration;
@@ -238,20 +239,23 @@ mod tests {
       assert!(!request.first_track_only);
    }
 
-   #[test]
-   fn subtitle_range_requires_paired_strictly_increasing_endpoints() {
-      for (start, end) in [
-         (Some(0), None),
-         (None, Some(1)),
-         (Some(1), Some(1)),
-         (Some(2), Some(1)),
-      ] {
-         assert!(
-            prepare_subtitle_request(None, None, start, end).is_err(),
-            "range {start:?}..{end:?} should fail"
-         );
-      }
+   #[rstest]
+   #[case::start_without_end(Some(0), None)]
+   #[case::end_without_start(None, Some(1))]
+   #[case::empty_range(Some(1), Some(1))]
+   #[case::reversed_range(Some(2), Some(1))]
+   fn subtitle_range_requires_paired_strictly_increasing_endpoints(
+      #[case] start: Option<u64>,
+      #[case] end: Option<u64>,
+   ) {
+      assert!(
+         prepare_subtitle_request(None, None, start, end).is_err(),
+         "range {start:?}..{end:?} should fail"
+      );
+   }
 
+   #[test]
+   fn subtitle_range_accepts_paired_strictly_increasing_endpoints() {
       let request = prepare_subtitle_request(None, None, Some(0), Some(1))
          .expect("a paired increasing range is valid");
       assert_eq!(
@@ -293,28 +297,33 @@ mod tests {
       assert!(error.contains("safe integer"));
    }
 
+   #[rstest]
+   #[case::start_without_end(Some(1), None)]
+   #[case::empty_range(Some(1), Some(1))]
+   #[case::reversed_range(Some(2), Some(1))]
    #[tokio::test]
-   async fn subtitle_invalid_and_empty_ranges_fail_before_reader_or_session_work() {
+   async fn subtitle_invalid_and_empty_ranges_fail_before_reader_or_session_work(
+      #[case] start: Option<u64>,
+      #[case] end: Option<u64>,
+   ) {
       let sessions = SubtitleSessions::default();
-      for (start, end) in [(Some(1), None), (Some(1), Some(1)), (Some(2), Some(1))] {
-         let error = subtitle_tracks(
-            &sessions,
-            "/file/that/does/not/exist.mp4",
-            None,
-            None,
-            start,
-            end,
-            &MergedHeaders::default(),
-         )
-         .await
-         .expect_err("invalid range must fail")
-         .to_string();
+      let error = subtitle_tracks(
+         &sessions,
+         "/file/that/does/not/exist.mp4",
+         None,
+         None,
+         start,
+         end,
+         &MergedHeaders::default(),
+      )
+      .await
+      .expect_err("invalid range must fail")
+      .to_string();
 
-         assert!(
-            error.contains("subtitle range"),
-            "unexpected error: {error}"
-         );
-      }
+      assert!(
+         error.contains("subtitle range"),
+         "unexpected error: {error}"
+      );
    }
 
    #[tokio::test]

@@ -32,13 +32,15 @@ pub(super) fn contract_null(operation: &str) -> DecodeError {
 #[cfg(test)]
 mod tests {
    use super::format_status;
+   use rstest::rstest;
 
-   #[test]
-   fn formats_signed_hex_and_printable_fourcc_statuses() {
-      assert_eq!(format_status(-12903), "-12903 (0xffffcd99)");
-      assert_eq!(
-         format_status(i32::from_be_bytes(*b"foo!")),
-         "1718578977 (0x666f6f21, 'foo!')"
-      );
+   #[rstest]
+   #[case::signed_hex(-12903, "-12903 (0xffffcd99)")]
+   #[case::printable_fourcc(i32::from_be_bytes(*b"foo!"), "1718578977 (0x666f6f21, 'foo!')")]
+   fn formats_signed_hex_and_printable_fourcc_statuses(
+      #[case] status: i32,
+      #[case] expected: &str,
+   ) {
+      assert_eq!(format_status(status), expected);
    }
 }

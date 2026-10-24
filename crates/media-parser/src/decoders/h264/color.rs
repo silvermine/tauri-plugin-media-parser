@@ -470,6 +470,7 @@ pub(super) fn resolve_gop_color<S: AsRef<[u8]>>(config: &AvcConfig, samples: &[S
 mod tests {
    use super::*;
    use crate::decoders::h264::{AvcColorMetadata, AvcConfig};
+   use rstest::rstest;
 
    struct BitWriter {
       bytes: Vec<u8>,
@@ -631,6 +632,20 @@ mod tests {
       sample
    }
 
+   fn gop_config(sps: Vec<Vec<u8>>, pps: Vec<Vec<u8>>, colr: AvcColorMetadata) -> AvcConfig {
+      AvcConfig {
+         length_size: 4,
+         sps,
+         pps,
+         color: colr,
+         display_width: 2,
+         display_height: 2,
+         max_input_size: None,
+         resolved_full_range: None,
+         resolved_codec_dimensions: None,
+      }
+   }
+
    fn geometry_sps(
       profile_idc: u8,
       width_in_mbs_minus1: u32,
@@ -671,37 +686,20 @@ mod tests {
       nal
    }
 
-   #[test]
-   fn exposes_progressive_sps_coded_dimensions() {
-      assert_eq!(
-         sps_coded_dimensions(&geometry_sps(66, 1, 2, true, false)),
-         Some((32, 48))
-      );
-   }
-
-   #[test]
-   fn doubles_interlaced_sps_coded_height() {
-      assert_eq!(
-         sps_coded_dimensions(&geometry_sps(66, 1, 2, false, false)),
-         Some((32, 96))
-      );
-   }
-
-   #[test]
-   fn preserves_large_parseable_sps_dimensions_in_u64() {
-      assert_eq!(
-         sps_coded_dimensions(&geometry_sps(66, u32::MAX - 1, 0, true, false)),
-         Some((u64::from(u32::MAX) * 16, 16))
-      );
-   }
-
-   #[test]
-   fn unsupported_or_truncated_sps_geometry_falls_back_to_none() {
-      assert_eq!(
-         sps_coded_dimensions(&geometry_sps(144, 1, 1, true, false)),
-         None
-      );
-      assert_eq!(sps_coded_dimensions(&[0x67, 66]), None);
+   #[rstest]
+   #[case::progressive(geometry_sps(66, 1, 2, true, false), Some((32, 48)))]
+   #[case::interlaced_doubles_height(geometry_sps(66, 1, 2, false, false), Some((32, 96)))]
+   #[case::large_parseable_kept_in_u64(
+      geometry_sps(66, u32::MAX - 1, 0, true, false),
+      Some((u64::from(u32::MAX) * 16, 16)),
+   )]
+   #[case::unsupported_profile(geometry_sps(144, 1, 1, true, false), None)]
+   #[case::truncated_nal(vec![0x67, 66], None)]
+   fn exposes_sps_coded_dimensions_or_none(
+      #[case] nal: Vec<u8>,
+      #[case] expected: Option<(u64, u64)>,
+   ) {
+      assert_eq!(sps_coded_dimensions(&nal), expected);
    }
 
    #[test]
@@ -712,13 +710,26 @@ mod tests {
       assert_eq!(sps_coded_dimensions(&nal), Some((32, 48)));
    }
 
-   #[test]
-   fn parses_matrix_and_range_from_sps_vui() {
-      let parsed = parse_sps_color(&baseline_sps(3, 1, true)).expect("valid SPS parses");
+   #[rstest]
+   #[case::baseline_profile(baseline_sps(3, 1, true), 3, Some(1), Some(true))]
+   #[case::high_profile_avc3(sps(100, 7, Some(6), false, 0, 0), 7, Some(6), Some(false))]
+   #[case::high_profile_scaling_matrix_flags(
+      sps(100, 4, Some(1), true, 0, 1),
+      4,
+      Some(1),
+      Some(true)
+   )]
+   fn parses_matrix_and_range_from_sps_vui(
+      #[case] nal: Vec<u8>,
+      #[case] sps_id: u32,
+      #[case] matrix_coefficients: Option<u16>,
+      #[case] full_range: Option<bool>,
+   ) {
+      let parsed = parse_sps_color(&nal).expect("valid SPS parses");
 
-      assert_eq!(parsed.sps.sps_id, 3);
-      assert_eq!(parsed.color.matrix_coefficients, Some(1));
-      assert_eq!(parsed.color.full_range, Some(true));
+      assert_eq!(parsed.sps.sps_id, sps_id);
+      assert_eq!(parsed.color.matrix_coefficients, matrix_coefficients);
+      assert_eq!(parsed.color.full_range, full_range);
    }
 
    #[test]
@@ -748,83 +759,45 @@ mod tests {
       assert_eq!(rbsp, [0, 0, 0, 0, 1]);
    }
 
-   #[test]
-   fn rejects_malformed_emulation_prevention_sequences() {
-      for nal in [&[0x67, 0, 0, 3][..], &[0x67, 0, 0, 3, 4][..]] {
-         let mut bits = bit_reader_from_nal(nal, 7).expect("SPS header is present");
-         assert_eq!(bits.read_bits(16), Ok(0));
+   #[rstest]
+   #[case::trailing_escape(&[0x67, 0, 0, 3])]
+   #[case::escape_before_byte_above_three(&[0x67, 0, 0, 3, 4])]
+   fn rejects_malformed_emulation_prevention_sequences(#[case] nal: &[u8]) {
+      let mut bits = bit_reader_from_nal(nal, 7).expect("SPS header is present");
+      assert_eq!(bits.read_bits(16), Ok(0));
 
-         let error = bits
-            .read_bit()
-            .expect_err("invalid emulation prevention must be rejected");
+      let error = bits
+         .read_bit()
+         .expect_err("invalid emulation prevention must be rejected");
 
-         assert!(error.contains("emulation prevention"));
-      }
+      assert!(error.contains("emulation prevention"));
    }
 
-   #[test]
-   fn skips_present_scaling_lists_before_vui() {
-      let parsed = parse_sps_color(&sps(100, 8, Some(1), false, 0, 2))
-         .expect("custom scaling list is skipped");
+   #[rstest]
+   #[case::present_scaling_lists(sps(100, 8, Some(1), false, 0, 2), 8, Some(1))]
+   #[case::pic_order_count_type_two(sps(66, 5, Some(1), false, 2, 0), 5, Some(1))]
+   #[case::pic_order_count_type_one(sps(66, 6, Some(6), false, 1, 0), 6, Some(6))]
+   fn skips_variable_sps_fields_before_vui(
+      #[case] nal: Vec<u8>,
+      #[case] sps_id: u32,
+      #[case] matrix_coefficients: Option<u16>,
+   ) {
+      let parsed = parse_sps_color(&nal).expect("valid SPS parses");
 
-      assert_eq!(parsed.sps.sps_id, 8);
-      assert_eq!(parsed.color.matrix_coefficients, Some(1));
-   }
-
-   #[test]
-   fn parses_high_profile_sps_used_by_common_avc3_streams() {
-      let parsed =
-         parse_sps_color(&sps(100, 7, Some(6), false, 0, 0)).expect("valid high SPS parses");
-
-      assert_eq!(parsed.sps.sps_id, 7);
-      assert_eq!(parsed.color.matrix_coefficients, Some(6));
-      assert_eq!(parsed.color.full_range, Some(false));
-   }
-
-   #[test]
-   fn skips_high_profile_scaling_matrix_flags_before_vui() {
-      let parsed = parse_sps_color(&sps(100, 4, Some(1), true, 0, 1))
-         .expect("high SPS with default scaling lists parses");
-
-      assert_eq!(parsed.sps.sps_id, 4);
-      assert_eq!(parsed.color.matrix_coefficients, Some(1));
-      assert_eq!(parsed.color.full_range, Some(true));
-   }
-
-   #[test]
-   fn parses_sps_with_pic_order_count_type_two() {
-      let parsed = parse_sps_color(&sps(66, 5, Some(1), false, 2, 0))
-         .expect("POC type 2 does not add SPS fields");
-
-      assert_eq!(parsed.sps.sps_id, 5);
-      assert_eq!(parsed.color.matrix_coefficients, Some(1));
-   }
-
-   #[test]
-   fn skips_pic_order_count_type_one_fields_before_vui() {
-      let parsed =
-         parse_sps_color(&sps(66, 6, Some(6), false, 1, 0)).expect("POC type 1 fields are skipped");
-
-      assert_eq!(parsed.sps.sps_id, 6);
-      assert_eq!(parsed.color.matrix_coefficients, Some(6));
+      assert_eq!(parsed.sps.sps_id, sps_id);
+      assert_eq!(parsed.color.matrix_coefficients, matrix_coefficients);
    }
 
    #[test]
    fn in_band_active_sps_overrides_avcc_and_colr_for_avc3() {
-      let config = AvcConfig {
-         length_size: 4,
-         sps: vec![baseline_sps(0, 6, false)],
-         pps: vec![pps(0, 0)],
-         color: AvcColorMetadata {
+      let config = gop_config(
+         vec![baseline_sps(0, 6, false)],
+         vec![pps(0, 0)],
+         AvcColorMetadata {
             matrix_coefficients: Some(6),
             full_range: Some(false),
          },
-         display_width: 2,
-         display_height: 2,
-         max_input_size: None,
-         resolved_full_range: None,
-         resolved_codec_dimensions: None,
-      };
+      );
       let sample = avc_sample(&[baseline_sps(1, 1, true), pps(3, 1), idr_slice(3)]);
 
       let color = resolve_gop_color(&config, &[sample]);
@@ -835,20 +808,14 @@ mod tests {
 
    #[test]
    fn resolves_matrix_and_range_independently_across_metadata_sources() {
-      let config = AvcConfig {
-         length_size: 4,
-         sps: Vec::new(),
-         pps: Vec::new(),
-         color: AvcColorMetadata {
+      let config = gop_config(
+         Vec::new(),
+         Vec::new(),
+         AvcColorMetadata {
             matrix_coefficients: Some(1),
             full_range: Some(false),
          },
-         display_width: 2,
-         display_height: 2,
-         max_input_size: None,
-         resolved_full_range: None,
-         resolved_codec_dimensions: None,
-      };
+      );
       let sample = avc_sample(&[sps(66, 2, None, true, 0, 0), pps(2, 2), idr_slice(2)]);
 
       let color = resolve_gop_color(&config, &[sample]);
@@ -859,17 +826,7 @@ mod tests {
 
    #[test]
    fn keeps_the_first_slices_policy_when_color_changes_mid_segment() {
-      let config = AvcConfig {
-         length_size: 4,
-         sps: Vec::new(),
-         pps: Vec::new(),
-         color: AvcColorMetadata::default(),
-         display_width: 2,
-         display_height: 2,
-         max_input_size: None,
-         resolved_full_range: None,
-         resolved_codec_dimensions: None,
-      };
+      let config = gop_config(Vec::new(), Vec::new(), AvcColorMetadata::default());
       let first = avc_sample(&[baseline_sps(0, 6, false), pps(0, 0), idr_slice(0)]);
       let second = avc_sample(&[baseline_sps(1, 1, false), pps(1, 1), idr_slice(1)]);
 
@@ -880,17 +837,11 @@ mod tests {
 
    #[test]
    fn ignores_unsupported_matrix_in_an_unused_sps() {
-      let config = AvcConfig {
-         length_size: 4,
-         sps: vec![baseline_sps(9, 9, false), baseline_sps(1, 1, false)],
-         pps: vec![pps(1, 1)],
-         color: AvcColorMetadata::default(),
-         display_width: 2,
-         display_height: 2,
-         max_input_size: None,
-         resolved_full_range: None,
-         resolved_codec_dimensions: None,
-      };
+      let config = gop_config(
+         vec![baseline_sps(9, 9, false), baseline_sps(1, 1, false)],
+         vec![pps(1, 1)],
+         AvcColorMetadata::default(),
+      );
       let sample = avc_sample(&[idr_slice(1)]);
 
       let color = resolve_gop_color(&config, &[sample]);
@@ -900,17 +851,11 @@ mod tests {
 
    #[test]
    fn approximates_bt2020_with_bt709_instead_of_failing() {
-      let config = AvcConfig {
-         length_size: 4,
-         sps: vec![baseline_sps(9, 9, false)],
-         pps: vec![pps(9, 9)],
-         color: AvcColorMetadata::default(),
-         display_width: 2,
-         display_height: 2,
-         max_input_size: None,
-         resolved_full_range: None,
-         resolved_codec_dimensions: None,
-      };
+      let config = gop_config(
+         vec![baseline_sps(9, 9, false)],
+         vec![pps(9, 9)],
+         AvcColorMetadata::default(),
+      );
       let sample = avc_sample(&[idr_slice(9)]);
 
       let color = resolve_gop_color(&config, &[sample]);
@@ -922,20 +867,14 @@ mod tests {
    #[test]
    fn falls_back_to_the_container_matrix_when_the_sps_one_is_unusable() {
       // YCgCo has no BT.601/BT.709 approximation, so the `colr` hint wins.
-      let config = AvcConfig {
-         length_size: 4,
-         sps: vec![baseline_sps(0, 8, false)],
-         pps: vec![pps(0, 0)],
-         color: AvcColorMetadata {
+      let config = gop_config(
+         vec![baseline_sps(0, 8, false)],
+         vec![pps(0, 0)],
+         AvcColorMetadata {
             matrix_coefficients: Some(1),
             full_range: None,
          },
-         display_width: 2,
-         display_height: 2,
-         max_input_size: None,
-         resolved_full_range: None,
-         resolved_codec_dimensions: None,
-      };
+      );
       let sample = avc_sample(&[idr_slice(0)]);
 
       let color = resolve_gop_color(&config, &[sample]);
@@ -943,26 +882,22 @@ mod tests {
       assert_eq!(color.matrix, MatrixCoefficients::Bt709);
    }
 
-   #[test]
-   fn falls_back_to_the_default_policy_for_unreadable_metadata() {
-      let config = AvcConfig {
-         length_size: 4,
-         sps: vec![vec![0x67, 0xff]],
-         pps: vec![vec![0x68, 0xff]],
-         color: AvcColorMetadata::default(),
-         display_width: 2,
-         display_height: 2,
-         max_input_size: None,
-         resolved_full_range: None,
-         resolved_codec_dimensions: None,
-      };
-      // An unsupported profile, a slice naming an unknown PPS, and a sample
-      // with no slice at all must all decode with the default policy.
-      let unreadable = avc_sample(&[sps(144, 0, Some(1), true, 0, 0), idr_slice(31)]);
+   #[rstest]
+   // An unsupported profile, a slice naming an unknown PPS, and a sample
+   // with no slice at all must all decode with the default policy.
+   #[case::unsupported_profile_and_unknown_pps(
+      vec![avc_sample(&[sps(144, 0, Some(1), true, 0, 0), idr_slice(31)])],
+   )]
+   #[case::sample_without_slice(vec![avc_sample(&[pps(0, 0)])])]
+   #[case::no_samples(Vec::new())]
+   fn falls_back_to_the_default_policy_for_unreadable_metadata(#[case] samples: Vec<Vec<u8>>) {
+      let config = gop_config(
+         vec![vec![0x67, 0xff]],
+         vec![vec![0x68, 0xff]],
+         AvcColorMetadata::default(),
+      );
 
-      for samples in [vec![unreadable], vec![avc_sample(&[pps(0, 0)])], Vec::new()] {
-         assert_eq!(resolve_gop_color(&config, &samples), GopColor::DEFAULT);
-      }
+      assert_eq!(resolve_gop_color(&config, &samples), GopColor::DEFAULT);
    }
 
    #[test]

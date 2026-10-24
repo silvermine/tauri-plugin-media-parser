@@ -241,11 +241,13 @@ fn read_fixed_16_16(buf: &[u8], offset: usize) -> Option<u32> {
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
 
-   #[test]
-   fn test_decode_language() {
-      assert_eq!(decode_language(0x15c7), Some(*b"eng"));
-      assert_eq!(decode_language(0x55c4), None);
+   #[rstest]
+   #[case::eng(0x15c7, Some(*b"eng"))]
+   #[case::undetermined_und(0x55c4, None)]
+   fn test_decode_language(#[case] code: u16, #[case] expected: Option<[u8; 3]>) {
+      assert_eq!(decode_language(code), expected);
    }
 
    #[test]

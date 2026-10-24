@@ -238,6 +238,7 @@ fn prepare_android_job_input<S: AsRef<[u8]>>(
 #[cfg(all(test, feature = "thumbnails"))]
 mod tests {
    use super::*;
+   use rstest::rstest;
 
    struct GeometryBits {
       bytes: Vec<u8>,
@@ -320,6 +321,17 @@ mod tests {
          resolved_codec_dimensions: None,
       }
    }
+
+   /// One-byte AVCC framing, matching `android_preflight_config`'s length size.
+   fn avcc1_sample(nals: &[&[u8]]) -> Vec<u8> {
+      let mut sample = Vec::new();
+      for nal in nals {
+         sample.push(u8::try_from(nal.len()).expect("test NAL fits one-byte length"));
+         sample.extend_from_slice(nal);
+      }
+      sample
+   }
+
    #[test]
    fn prepares_the_resolved_range_only_on_the_job_clone() {
       let config = AvcConfig {
@@ -353,24 +365,25 @@ mod tests {
       assert_eq!(config.resolved_codec_dimensions, None);
    }
 
-   #[test]
-   fn android_preparation_bounds_container_dimensions_before_open() {
-      assert_eq!(validate_android_job_dimensions(16_384, 1), Ok(()));
-      assert!(matches!(
-         validate_android_job_dimensions(16_385, 1),
-         Err(DecodeError::ResourceLimit(_))
-      ));
+   #[rstest]
+   #[case::axis_at_limit(16_384, 1)]
+   #[case::odd_compact_geometry(3, 3)]
+   fn android_preparation_accepts_container_dimensions_within_limits(
+      #[case] width: u32,
+      #[case] height: u32,
+   ) {
+      assert_eq!(validate_android_job_dimensions(width, height), Ok(()));
    }
 
-   #[test]
-   fn android_preparation_accepts_odd_compact_geometry() {
-      assert_eq!(validate_android_job_dimensions(3, 3), Ok(()));
-   }
-
-   #[test]
-   fn android_preparation_rejects_compact_surface_above_byte_limit() {
+   #[rstest]
+   #[case::axis_above_limit(16_385, 1)]
+   #[case::compact_surface_above_byte_limit(8_192, 8_192)]
+   fn android_preparation_rejects_container_dimensions_above_limits(
+      #[case] width: u32,
+      #[case] height: u32,
+   ) {
       assert!(matches!(
-         validate_android_job_dimensions(8_192, 8_192),
+         validate_android_job_dimensions(width, height),
          Err(DecodeError::ResourceLimit(_))
       ));
    }
@@ -399,74 +412,65 @@ mod tests {
          prepare_android_job_input(&config, &[vec![1, 0x65]]).expect("SPS supplies geometry");
       assert_eq!(prepared.codec_dimensions, Some((320, 240)));
       assert_eq!((config.display_width, config.display_height), (0, 0));
+   }
 
-      let in_band = geometry_sps(19, 14);
-      config.sps.clear();
-      let mut sample = vec![u8::try_from(in_band.len()).unwrap()];
-      sample.extend_from_slice(&in_band);
-      sample.extend_from_slice(&[1, 0x65]);
+   #[test]
+   fn android_preparation_uses_in_band_sps_for_zero_sample_entry() {
+      let mut config = android_preflight_config(Vec::new());
+      config.display_width = 0;
+      config.display_height = 0;
+      let sample = avcc1_sample(&[&geometry_sps(19, 14), &[0x65]]);
+
       let prepared =
          prepare_android_job_input(&config, &[sample]).expect("in-band SPS supplies geometry");
       assert_eq!(prepared.codec_dimensions, Some((320, 240)));
    }
 
-   #[test]
-   fn android_preparation_rejects_zero_sample_entry_without_interpretable_sps() {
-      for sps in [Vec::new(), vec![vec![0x67, 144, 0, 30, 0x80]]] {
-         let mut config = android_preflight_config(sps);
-         config.display_width = 0;
-         config.display_height = 0;
-         assert!(matches!(
-            prepare_android_job_input(&config, &[vec![1, 0x65]]),
-            Err(DecodeError::UnsupportedFormat(message)) if message.contains("SPS")
-         ));
-      }
-   }
-
-   #[test]
-   fn android_preparation_takes_whole_sps_pair_when_one_axis_is_zero() {
-      for (width, height) in [(1_920, 0), (0, 1_080)] {
-         let mut config = android_preflight_config(vec![geometry_sps(19, 14)]);
-         config.display_width = width;
-         config.display_height = height;
-
-         let prepared =
-            prepare_android_job_input(&config, &[vec![1, 0x65]]).expect("SPS supplies geometry");
-         assert_eq!(prepared.codec_dimensions, Some((320, 240)));
-      }
-   }
-
-   #[test]
-   fn android_preparation_preserves_nonzero_sample_entry() {
-      let mut config = android_preflight_config(vec![geometry_sps(119, 67)]);
-      config.display_width = 1_920;
-      config.display_height = 1_080;
-
-      let prepared =
-         prepare_android_job_input(&config, &[vec![1, 0x65]]).expect("stsd dimensions are valid");
-      assert_eq!(prepared.codec_dimensions, Some((1_920, 1_080)));
-   }
-
-   #[test]
-   fn android_preflight_rejects_oversized_config_and_in_band_sps() {
-      let oversized = geometry_sps(1_024, 0);
-      let config = android_preflight_config(vec![oversized.clone()]);
+   #[rstest]
+   #[case::no_sps(Vec::new())]
+   #[case::unparseable_sps(vec![vec![0x67, 144, 0, 30, 0x80]])]
+   fn android_preparation_rejects_zero_sample_entry_without_interpretable_sps(
+      #[case] sps: Vec<Vec<u8>>,
+   ) {
+      let mut config = android_preflight_config(sps);
+      config.display_width = 0;
+      config.display_height = 0;
       assert!(matches!(
          prepare_android_job_input(&config, &[vec![1, 0x65]]),
-         Err(DecodeError::ResourceLimit(_))
+         Err(DecodeError::UnsupportedFormat(message)) if message.contains("SPS")
       ));
+   }
 
-      let config = android_preflight_config(Vec::new());
-      let mut sample = vec![u8::try_from(oversized.len()).expect("test SPS fits one-byte length")];
-      sample.extend_from_slice(&oversized);
+   #[rstest]
+   #[case::zero_height_takes_whole_sps_pair(geometry_sps(19, 14), 1_920, 0, (320, 240))]
+   #[case::zero_width_takes_whole_sps_pair(geometry_sps(19, 14), 0, 1_080, (320, 240))]
+   #[case::nonzero_sample_entry_is_preserved(geometry_sps(119, 67), 1_920, 1_080, (1_920, 1_080))]
+   fn android_preparation_uses_sample_entry_unless_one_axis_is_zero(
+      #[case] sps: Vec<u8>,
+      #[case] width: u32,
+      #[case] height: u32,
+      #[case] codec_dimensions: (u32, u32),
+   ) {
+      let mut config = android_preflight_config(vec![sps]);
+      config.display_width = width;
+      config.display_height = height;
+
+      let prepared = prepare_android_job_input(&config, &[vec![1, 0x65]])
+         .expect("sample entry or SPS supplies geometry");
+      assert_eq!(prepared.codec_dimensions, Some(codec_dimensions));
+   }
+
+   #[rstest]
+   #[case::oversized_config_sps(vec![geometry_sps(1_024, 0)], vec![1, 0x65])]
+   #[case::oversized_in_band_sps(Vec::new(), avcc1_sample(&[&geometry_sps(1_024, 0)]))]
+   #[case::huge_u64_config_sps(vec![geometry_sps(u32::MAX - 1, 0)], vec![1, 0x65])]
+   fn android_preflight_rejects_oversized_config_and_in_band_sps(
+      #[case] sps: Vec<Vec<u8>>,
+      #[case] sample: Vec<u8>,
+   ) {
+      let config = android_preflight_config(sps);
       assert!(matches!(
          prepare_android_job_input(&config, &[sample]),
-         Err(DecodeError::ResourceLimit(_))
-      ));
-
-      let huge_u64_geometry = android_preflight_config(vec![geometry_sps(u32::MAX - 1, 0)]);
-      assert!(matches!(
-         prepare_android_job_input(&huge_u64_geometry, &[vec![1, 0x65]]),
          Err(DecodeError::ResourceLimit(_))
       ));
    }
@@ -478,26 +482,34 @@ mod tests {
       assert!(prepare_android_job_input(&config, &[vec![1, 0x65]]).is_ok());
    }
 
-   #[test]
-   fn apple_preflight_rejects_oversized_config_and_in_band_sps() {
-      for sps in [
-         geometry_sps(1_024, 0),
-         geometry_sps(511, 511),
-         geometry_sps(u32::MAX - 1, 0),
-      ] {
-         let config = android_preflight_config(vec![sps.clone()]);
-         assert!(matches!(
-            prepare_apple_max_input_size(&config, &[vec![1, 0x65]]),
-            Err(DecodeError::ResourceLimit(_))
-         ));
-         let config = android_preflight_config(Vec::new());
-         let mut sample = vec![u8::try_from(sps.len()).unwrap()];
-         sample.extend_from_slice(&sps);
-         assert!(matches!(
-            prepare_apple_max_input_size(&config, &[vec![1, 0x65], sample]),
-            Err(DecodeError::ResourceLimit(_))
-         ));
-      }
+   #[rstest]
+   #[case::oversized_width_config_sps(vec![geometry_sps(1_024, 0)], vec![vec![1, 0x65]])]
+   #[case::oversized_width_in_band_sps(
+      Vec::new(),
+      vec![vec![1, 0x65], avcc1_sample(&[&geometry_sps(1_024, 0)])],
+   )]
+   #[case::oversized_area_config_sps(vec![geometry_sps(511, 511)], vec![vec![1, 0x65]])]
+   #[case::oversized_area_in_band_sps(
+      Vec::new(),
+      vec![vec![1, 0x65], avcc1_sample(&[&geometry_sps(511, 511)])],
+   )]
+   #[case::huge_u64_width_config_sps(vec![geometry_sps(u32::MAX - 1, 0)], vec![vec![1, 0x65]])]
+   #[case::huge_u64_width_in_band_sps(
+      Vec::new(),
+      vec![
+         vec![1, 0x65],
+         avcc1_sample(&[&geometry_sps(u32::MAX - 1, 0)]),
+      ],
+   )]
+   fn apple_preflight_rejects_oversized_config_and_in_band_sps(
+      #[case] sps: Vec<Vec<u8>>,
+      #[case] samples: Vec<Vec<u8>>,
+   ) {
+      let config = android_preflight_config(sps);
+      assert!(matches!(
+         prepare_apple_max_input_size(&config, &samples),
+         Err(DecodeError::ResourceLimit(_))
+      ));
    }
 
    #[test]

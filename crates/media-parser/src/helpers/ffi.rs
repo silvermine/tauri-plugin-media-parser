@@ -23,32 +23,20 @@ pub fn valid_ffi_region(data: *const u8, size: usize) -> bool {
 #[cfg(test)]
 mod tests {
    use super::*;
+   use rstest::rstest;
    use std::ptr::{self, NonNull};
 
-   #[test]
-   fn test_valid_ffi_region_accepts_an_ordinary_region() {
-      assert!(valid_ffi_region(NonNull::<u8>::dangling().as_ptr(), 1));
-   }
-
-   #[test]
-   fn test_valid_ffi_region_rejects_null() {
-      assert!(!valid_ffi_region(ptr::null(), 1));
-   }
-
-   #[test]
-   fn test_valid_ffi_region_rejects_a_size_past_isize_max() {
-      let ordinary = NonNull::<u8>::dangling().as_ptr();
-
-      assert!(!valid_ffi_region(ordinary, isize::MAX as usize + 1));
-   }
-
-   #[test]
-   fn test_valid_ffi_region_rejects_a_wrapping_region() {
-      assert!(!valid_ffi_region(usize::MAX as *const u8, 1));
-   }
-
-   #[test]
-   fn test_valid_ffi_region_accepts_a_zero_length_region() {
-      assert!(valid_ffi_region(NonNull::<u8>::dangling().as_ptr(), 0));
+   #[rstest]
+   #[case::ordinary_region(NonNull::<u8>::dangling().as_ptr(), 1, true)]
+   #[case::null(ptr::null(), 1, false)]
+   #[case::size_past_isize_max(
+      NonNull::<u8>::dangling().as_ptr(),
+      isize::MAX as usize + 1,
+      false
+   )]
+   #[case::wrapping_region(usize::MAX as *const u8, 1, false)]
+   #[case::zero_length_region(NonNull::<u8>::dangling().as_ptr(), 0, true)]
+   fn test_valid_ffi_region(#[case] data: *const u8, #[case] size: usize, #[case] valid: bool) {
+      assert_eq!(valid_ffi_region(data, size), valid);
    }
 }
